@@ -131,7 +131,7 @@ tab_cal, tab_import, tab_b, tab_c = st.tabs([
 with tab_cal:
     st.subheader("出貨行事曆")
 
-    col_nav1, col_nav2, col_nav3, _ = st.columns([1, 2, 1, 4])
+    col_nav1, col_nav2, col_nav3, _ = st.columns([1, 3, 1, 3])
     today = date.today()
 
     if "cal_year"  not in st.session_state: st.session_state.cal_year  = today.year
@@ -149,9 +149,9 @@ with tab_cal:
     with col_nav2:
         tw_year = st.session_state.cal_year - 1911
         st.markdown(
-            f"<h3 style='text-align:center;margin:0'>"
+            f"<div style='text-align:center;font-size:20px;font-weight:bold;padding:6px 0'>"
             f"{st.session_state.cal_year}/{st.session_state.cal_month:02d}"
-            f"　（民國 {tw_year} 年）</h3>",
+            f"&nbsp;&nbsp;（民國 {tw_year} 年）</div>",
             unsafe_allow_html=True,
         )
 

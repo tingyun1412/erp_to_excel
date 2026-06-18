@@ -59,9 +59,16 @@ def get_sheet(sheet_name: str):
 # ── 出貨排程 ──────────────────────────────────────────────────────
 
 def _rows_to_records(rows: list[list], headers: list[str]) -> list[dict]:
-    """把 get_all_values() 的原始列表轉成 dict，跳過全空列"""
+    """
+    把 get_all_values() 的原始列表轉成 dict，跳過全空列。
+    自動偵測第一列是否為標題列（若第一欄內容與 headers[0] 相同則跳過）。
+    """
+    if not rows:
+        return []
+    first_row = rows[0]
+    start = 1 if (first_row and str(first_row[0]).strip() == headers[0]) else 0
     records = []
-    for row in rows[1:]:  # 跳過標題列
+    for row in rows[start:]:
         if not any(str(c).strip() for c in row):
             continue
         record = {h: (row[i] if i < len(row) else "") for i, h in enumerate(headers)}
