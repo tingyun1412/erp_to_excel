@@ -217,14 +217,27 @@ with tab_cal:
                     f"<div style='font-weight:bold;font-size:14px'>{day_num}</div>"
                 )
                 for item in items_today[:3]:
-                    status = item.get("狀態", "待出貨")
-                    color  = STATUS_COLOR.get(status, "#888")
-                    label  = f"{item.get('客戶名稱','')} {item.get('料號','')}"
+                    status   = item.get("狀態", "待出貨")
+                    color    = STATUS_COLOR.get(status, "#888")
+                    customer = item.get("客戶名稱", "")
+                    item_no  = item.get("料號", "")
+                    qty      = item.get("數量", "")
+                    cust_no  = item.get("客戶料號", "")
+                    order_no = item.get("銷貨單號", "")
+                    # tooltip 顯示完整資訊
+                    tooltip  = f"{customer} | {item_no} | {qty} | {cust_no} | {order_no}"
+                    # 格內顯示：客戶名稱 / 料號 / 數量
+                    lines = []
+                    if customer: lines.append(customer)
+                    if item_no:  lines.append(item_no)
+                    if qty:      lines.append(f"× {qty}")
+                    if cust_no:  lines.append(f"({cust_no})")
+                    display = "  ".join(lines)
                     html += (
                         f"<div style='background:{color};color:white;"
-                        f"border-radius:3px;padding:2px 4px;margin-top:2px;"
-                        f"font-size:10px;overflow:hidden;white-space:nowrap;"
-                        f"text-overflow:ellipsis' title='{label}'>{label}</div>"
+                        f"border-radius:3px;padding:3px 5px;margin-top:3px;"
+                        f"font-size:10px;line-height:1.4;word-break:break-all'"
+                        f" title='{tooltip}'>{display}</div>"
                     )
                 if len(items_today) > 3:
                     html += f"<div style='font-size:10px;color:#888'>+{len(items_today)-3} 筆</div>"
