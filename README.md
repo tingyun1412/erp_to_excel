@@ -1,73 +1,55 @@
-# 倉庫出貨自動化工具
+# 出貨自動化工具
 
-## 快速啟動
+## 本地啟動
 
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-瀏覽器會自動開啟 http://localhost:8501
+本地執行前，先把 `.streamlit/secrets.toml` 填入真實的 Google 憑證。
 
 ---
 
-## 檔案結構
+## 部署到 Streamlit Cloud
 
+1. 把這個資料夾推到 GitHub（私有 repo）
+2. 到 https://share.streamlit.io 連結 repo，main file 選 `app.py`
+3. 在 App Settings → **Secrets** 貼入以下內容（換成真實值）：
+
+```toml
+[gcp_service_account]
+type = "service_account"
+project_id = "erptoexcel"
+private_key_id = "07b1db8a..."
+private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+client_email = "erp-995@erptoexcel.iam.gserviceaccount.com"
+client_id = "117422..."
+auth_uri = "https://accounts.google.com/o/oauth2/auth"
+token_uri = "https://oauth2.googleapis.com/token"
+auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+client_x509_cert_url = "https://www.googleapis.com/robot/v1/metadata/x509/erp-995%40erptoexcel.iam.gserviceaccount.com"
 ```
-erp_app/
-├── app.py                  # Streamlit 主介面
-├── rtf_parser.py           # 解析銷貨單 RTF
-├── module_a_calendar.py    # 模組A：產出出貨行事曆
-├── module_b_invoice.py     # 模組B：產出電子發票 Excel
-├── module_c_labels.py      # 模組C：產出出貨標籤 Excel
-└── requirements.txt
-```
+
+4. Deploy → 拿到網址給同事用
 
 ---
 
-## 新增標籤格式（給開發者）
+## 檔案說明
 
-在 `module_c_labels.py` 找到 `LABEL_TEMPLATES` 字典：
-
-```python
-LABEL_TEMPLATES: dict[str, callable] = {
-    "標準格式（含完整資訊）":     _label_standard,
-    "簡易格式（料號+品名+數量）": _label_simple,
-    # ↓ 在這裡加新格式
-    "你的新格式名稱":            your_new_function,
-}
-```
-
-新增步驟：
-1. 寫一個 function，簽名：`def your_fn(ws, row_start, item, order) -> int`
-   - `ws`：openpyxl Worksheet
-   - `row_start`：從第幾行開始畫這張標籤
-   - `item`：品項 dict（含 item_no, description, quantity, unit, customer, ship_date, remark）
-   - `order`：銷貨單 dict（含 order_no, order_date, customer_order_no, ...）
-   - 回傳值：下一張標籤應該從哪行開始
-2. 把 function 加到 `LABEL_TEMPLATES`
-3. 重啟 `streamlit run app.py`，下拉選單就會出現新格式
+| 檔案 | 說明 |
+|------|------|
+| `app.py` | 主介面 |
+| `rtf_parser.py` | 解析銷貨單 RTF |
+| `sheets_db.py` | Google Sheets 讀寫 |
+| `module_b_invoice.py` | 電子發票產生 |
+| `module_c_labels.py` | 標籤產生（含欄位自訂） |
+| `.streamlit/secrets.toml` | 憑證設定（不推 GitHub）|
 
 ---
 
-## 部署選項
+## 注意事項
 
-### 選項 A：Streamlit Community Cloud（免費）
-1. 把 `erp_app/` 資料夾推到 GitHub
-2. 到 https://share.streamlit.io 連結 repo
-3. 取得公開網址給同事使用
-
-### 選項 B：打包成 .exe
-```bash
-pip install pyinstaller
-pyinstaller --onefile --add-data "*.py;." app.py
-```
-（需要在有完整 Python 環境的 Windows 機器上執行）
-
----
-
-## 已知限制
-
-- RTF 解析依賴檔名格式（`YYYYMMDDXXXX-客戶.rtf`）來抓銷貨單號
-- 若 RTF 內部欄位值解析不到，可在「銷貨單預覽」tab 手動補充
-- 電子發票的單價/金額需手動補（RTF 格式確認後可改進解析邏輯）
+- `.streamlit/secrets.toml` 已加入 `.gitignore`，**不會**推到 GitHub
+- Google Service Account 的 JSON key 請定期輪換（建議每年）
+- Streamlit Cloud 免費版閒置 7 天會睡眠，第一個使用者開網頁時等約 30 秒喚醒
