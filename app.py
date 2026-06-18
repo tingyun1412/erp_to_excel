@@ -38,6 +38,21 @@ STATUS_COLOR = {
 }
 
 
+def _fmt_date_display(d: str) -> str:
+    if len(d) == 8:
+        return f"{d[:4]}/{d[4:6]}/{d[6:8]}"
+    return d
+
+
+def _parse_date(d: str):
+    for fmt in ["%Y/%m/%d", "%Y%m%d"]:
+        try:
+            return datetime.strptime(d, fmt).date()
+        except ValueError:
+            pass
+    return None
+
+
 # ════════════════════════════════════════════════════════════════
 #  側邊欄：上傳銷貨單
 # ════════════════════════════════════════════════════════════════
@@ -99,21 +114,6 @@ with st.sidebar:
         if st.button("清除暫存", use_container_width=True):
             st.session_state.parsed_orders = []
             st.rerun()
-
-
-def _fmt_date_display(d: str) -> str:
-    if len(d) == 8:
-        return f"{d[:4]}/{d[4:6]}/{d[6:8]}"
-    return d
-
-
-def _parse_date(d: str):
-    for fmt in ["%Y/%m/%d", "%Y%m%d"]:
-        try:
-            return datetime.strptime(d, fmt).date()
-        except ValueError:
-            pass
-    return None
 
 
 # ════════════════════════════════════════════════════════════════
