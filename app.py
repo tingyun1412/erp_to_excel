@@ -22,6 +22,7 @@ from sheets_db import (
     append_schedule_rows, load_schedule,
     append_order,
     load_templates, save_template, delete_template,
+    clear_cache,
 )
 
 st.set_page_config(page_title="出貨自動化工具", page_icon="📦", layout="wide")
@@ -92,6 +93,7 @@ with st.sidebar:
                 try:
                     added = append_schedule_rows(schedule_rows)
                     st.success(f"解析完成，新增 {added} 筆到 Google Sheets")
+                    clear_cache()
                 except Exception as e:
                     st.warning(f"本地解析成功，但寫入 Sheets 失敗：{e}")
 
@@ -307,6 +309,7 @@ with tab_label:
                     del st.session_state["_pending_tmpl_bytes"]
                     del st.session_state["_pending_customer"]
                     del st.session_state["_pending_tmpl_name"]
+                    clear_cache()
                     st.success(f"模板「{customer} — {tmpl_name}」已儲存！")
                     st.rerun()
                 except Exception as e:
@@ -330,6 +333,7 @@ with tab_label:
                         if st.button("刪除此模板", key=f"del_{r['廠商名稱']}_{r['模板名稱']}"):
                             try:
                                 delete_template(r["廠商名稱"], r["模板名稱"])
+                                clear_cache()
                                 st.success("已刪除")
                                 st.rerun()
                             except Exception as e:

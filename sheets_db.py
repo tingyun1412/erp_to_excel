@@ -2,6 +2,7 @@
 Google Sheets 資料庫層
 """
 import json
+import time
 from datetime import datetime
 import streamlit as st
 import gspread
@@ -70,6 +71,7 @@ def _rows_to_records(rows: list[list], headers: list[str]) -> list[dict]:
 
 # ── 出貨排程 ──────────────────────────────────────────────────────
 
+@st.cache_data(ttl=60)
 def load_schedule() -> list[dict]:
     ws = get_sheet(SHEET_SCHEDULE)
     rows = ws.get_all_values()
@@ -110,6 +112,7 @@ def update_schedule_status(row_index: int, status: str, remark: str = ""):
 
 # ── 銷貨單主檔 ────────────────────────────────────────────────────
 
+@st.cache_data(ttl=60)
 def load_orders() -> list[dict]:
     ws = get_sheet(SHEET_ORDERS)
     rows = ws.get_all_values()
@@ -134,6 +137,7 @@ def append_order(order: dict):
 
 # ── 廠商標籤設定（欄位偏好） ──────────────────────────────────────
 
+@st.cache_data(ttl=120)
 def load_label_config(customer: str) -> list[str] | None:
     ws = get_sheet(SHEET_LABELS)
     records = _rows_to_records(ws.get_all_values(), LABELS_HEADERS)
@@ -158,6 +162,7 @@ def save_label_config(customer: str, fields: list[str]):
     ws.append_row([customer, fields_str, now])
 
 
+@st.cache_data(ttl=120)
 def load_all_label_configs() -> dict[str, list[str]]:
     ws = get_sheet(SHEET_LABELS)
     records = _rows_to_records(ws.get_all_values(), LABELS_HEADERS)
@@ -172,6 +177,7 @@ def load_all_label_configs() -> dict[str, list[str]]:
 
 # ── 標籤模板 ──────────────────────────────────────────────────────
 
+@st.cache_data(ttl=120)
 def load_templates(customer: str = "") -> list[dict]:
     ws = get_sheet(SHEET_TEMPLATES)
     records = _rows_to_records(ws.get_all_values(), TEMPLATES_HEADERS)
@@ -199,3 +205,12 @@ def delete_template(customer: str, template_name: str):
         if r.get("廠商名稱") == customer and r.get("模板名稱") == template_name:
             ws.delete_rows(i + 2)
             return
+
+
+def clear_cache():
+    """寫入資料後呼叫，確保下次讀取是最新資料"""
+    load_schedule.clear()
+    load_orders.clear()
+    load_templates.clear()
+    load_label_config.clear()
+    load_all_label_configs.clear()
