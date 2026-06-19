@@ -14,13 +14,11 @@ import openpyxl
 from rtf_parser import parse_sales_order_rtf
 from module_b_invoice import generate_invoice_excel
 from template_engine import (
-    analyze_template, generate_from_template,
+    analyze_template, analyze_all_sheets, generate_from_template,
     template_to_json, template_from_json,
     get_field_options, FIELD_LABELS, DYNAMIC_FIELDS,
 )
 from sheets_db import (
-    append_schedule_rows, load_schedule,
-    append_order,
     load_templates, save_template, delete_template,
     clear_cache,
 )
@@ -33,11 +31,6 @@ if "parsed_orders" not in st.session_state:
 if "template_wb_bytes" not in st.session_state:
     st.session_state.template_wb_bytes = {}  # {template_key: bytes}
 
-
-def _fmt_date_display(d: str) -> str:
-    if len(d) == 8:
-        return f"{d[:4]}/{d[4:6]}/{d[6:8]}"
-    return d
 
 
 # ════════════════════════════════════════════════════════════════
@@ -70,34 +63,8 @@ with st.sidebar:
                 st.error(err)
 
             if orders:
-                schedule_rows = []
-                for order in orders:
-                    try:
-                        append_order(order)
-                    except Exception:
-                        pass
-                    for item in order.get("items", []):
-                        schedule_rows.append({
-                            "銷貨單號":   order.get("order_no", ""),
-                            "出貨日期":   _fmt_date_display(item.get("ship_date", "")),
-                            "客戶名稱":   item.get("customer", ""),
-                            "料號":       item.get("item_no", ""),
-                            "品名":       item.get("description", ""),
-                            "數量":       item.get("quantity", ""),
-                            "單位":       item.get("unit", "PC"),
-                            "客戶料號":   item.get("remark", ""),
-                            "客戶訂單號": order.get("customer_order_no", ""),
-                            "狀態":       "待出貨",
-                            "備註":       "",
-                        })
-                try:
-                    added = append_schedule_rows(schedule_rows)
-                    st.success(f"解析完成，新增 {added} 筆到 Google Sheets")
-                    clear_cache()
-                except Exception as e:
-                    st.warning(f"本地解析成功，但寫入 Sheets 失敗：{e}")
-
                 st.session_state.parsed_orders = orders
+                st.success(f"解析完成，共 {len(orders)} 張銷貨單")
                 st.rerun()
 
     st.divider()
@@ -111,10 +78,9 @@ with st.sidebar:
 # ════════════════════════════════════════════════════════════════
 #  主頁籤
 # ════════════════════════════════════════════════════════════════
-tab_label, tab_invoice, tab_preview = st.tabs([
+tab_label, tab_invoice = st.tabs([
     "🏷 出貨標籤",
     "🧾 電子發票",
-    "📋 已匯入記錄",
 ])
 
 
@@ -128,9 +94,9 @@ with tab_label:
 
     # ── 產出標籤 ──────────────────────────────────────────────
     with sub_tab_use:
-        orders = st.session_state.parsed_orders
+        all_orders = st.session_state.parsed_orders
 
-        if not orders:
+        if not all_orders:
             st.info("請先在左側上傳並解析銷貨單")
         else:
             # 載入所有模板
@@ -143,45 +109,65 @@ with tab_label:
             if not all_templates:
                 st.warning("尚無任何標籤模板，請先到「管理模板」上傳")
             else:
-                # 選模板
-                template_options = [
-                    f"{r['廠商名稱']} — {r['模板名稱']}"
-                    for r in all_templates
+                col_left, col_right = st.columns([1, 1])
+
+                with col_left:
+                    # 選模板
+                    template_options = [
+                        f"{r['廠商名稱']} — {r['模板名稱']}"
+                        for r in all_templates
+                    ]
+                    selected_idx = st.selectbox(
+                        "選擇標籤模板",
+                        options=range(len(template_options)),
+                        format_func=lambda i: template_options[i],
+                    )
+                    selected_record = all_templates[selected_idx]
+                    template_info = template_from_json(selected_record["設定JSON"])
+                    st.caption(
+                        f"標籤單元 {template_info.get('unit_rows')} 行　"
+                        f"｜　每列 {template_info.get('units_per_row')} 個並排"
+                    )
+
+                with col_right:
+                    # 選銷貨單
+                    order_options = {
+                        o.get("order_no", o.get("filename", f"單{i}")): o
+                        for i, o in enumerate(all_orders)
+                    }
+                    selected_order_nos = st.multiselect(
+                        "選擇要產生標籤的銷貨單",
+                        options=list(order_options.keys()),
+                        default=list(order_options.keys()),
+                    )
+                    selected_orders = [order_options[k] for k in selected_order_nos]
+
+                # 顯示選取的品項
+                selected_items = [
+                    (item, order)
+                    for order in selected_orders
+                    for item in order.get("items", [])
                 ]
-                selected_idx = st.selectbox(
-                    "選擇標籤模板",
-                    options=range(len(template_options)),
-                    format_func=lambda i: template_options[i],
-                )
-                selected_record = all_templates[selected_idx]
-                template_info = template_from_json(selected_record["設定JSON"])
+                if selected_items:
+                    st.dataframe(
+                        [{
+                            "銷貨單號": order.get("order_no",""),
+                            "料號":     item.get("item_no",""),
+                            "品名":     item.get("description",""),
+                            "數量":     item.get("quantity",""),
+                            "客戶料號": item.get("remark",""),
+                        } for item, order in selected_items],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                    st.caption(f"共 {len(selected_items)} 個品項，依數量產生對應張數標籤")
+                else:
+                    st.warning("請選擇至少一張銷貨單")
 
-                # 顯示模板資訊
-                with st.expander("模板欄位設定預覽"):
-                    cells = template_info.get("cells", [])
-                    if cells:
-                        st.dataframe(
-                            [{"位置": f"R{c['row']}C{c['col']}", "原始值": c['value'], "對應欄位": c['field']} for c in cells],
-                            use_container_width=True,
-                            hide_index=True,
-                        )
-
-                st.info(
-                    f"模板：{selected_record['廠商名稱']} — {selected_record['模板名稱']}　"
-                    f"｜　標籤單元 {template_info.get('unit_rows')} 行　"
-                    f"｜　每列 {template_info.get('units_per_row')} 個並排"
-                )
-
-                # 品項列表
-                all_items = [(item, order) for order in orders for item in order.get("items", [])]
-                st.write(f"共 {len(all_items)} 個品項，每個品項依數量產生對應張數標籤")
-
-                # 需要原始模板 workbook 才能複製樣式
+                # 模板 workbook（用來複製樣式）
                 tmpl_key = f"{selected_record['廠商名稱']}_{selected_record['模板名稱']}"
-                has_wb = tmpl_key in st.session_state.template_wb_bytes
-
-                if not has_wb:
-                    st.warning("需要上傳原始模板 Excel 才能保留完整樣式（字型/框線等）")
+                if tmpl_key not in st.session_state.template_wb_bytes:
+                    st.warning("需要上傳原始模板 Excel 才能保留字型/框線樣式")
                     re_upload = st.file_uploader(
                         "重新上傳此廠商的模板 Excel",
                         type=["xlsx", "xls"],
@@ -191,17 +177,15 @@ with tab_label:
                         st.session_state.template_wb_bytes[tmpl_key] = re_upload.read()
                         st.rerun()
 
-                if st.button("產出標籤 Excel", type="primary", use_container_width=True):
+                if selected_items and st.button("產出標籤 Excel", type="primary", use_container_width=True):
                     with st.spinner("產出中..."):
                         try:
                             wb_bytes = st.session_state.template_wb_bytes.get(tmpl_key)
-                            if wb_bytes:
-                                from io import BytesIO as _BytesIO
-                                template_wb = openpyxl.load_workbook(_BytesIO(wb_bytes))
-                            else:
-                                template_wb = openpyxl.Workbook()
-
-                            buf = generate_from_template(template_info, orders, template_wb)
+                            template_wb = (
+                                openpyxl.load_workbook(BytesIO(wb_bytes))
+                                if wb_bytes else openpyxl.Workbook()
+                            )
+                            buf = generate_from_template(template_info, selected_orders, template_wb)
                             st.download_button(
                                 "⬇️ 下載標籤.xlsx",
                                 data=buf,
@@ -231,28 +215,53 @@ with tab_label:
             key="new_template_upload",
         )
 
-        if uploaded_tmpl and new_customer and new_tmpl_name:
+        if uploaded_tmpl and new_customer:
             tmpl_bytes = uploaded_tmpl.read()
             wb = openpyxl.load_workbook(BytesIO(tmpl_bytes))
-
             sheet_names = wb.sheetnames
-            selected_sheet = st.selectbox("選擇要分析的工作表", sheet_names)
 
-            if st.button("分析模板", type="primary"):
-                with st.spinner("分析中..."):
-                    template_info = analyze_template(wb, selected_sheet)
+            batch_mode = st.checkbox(
+                "批次建立（每個工作表自動建立一個模板）",
+                value=len(sheet_names) > 1,
+            )
 
-                if not template_info:
-                    st.error("無法分析此工作表，請確認內容不為空")
-                else:
-                    st.success(
-                        f"分析完成：{template_info['unit_rows']} 行/標籤，"
-                        f"每列 {template_info['units_per_row']} 個並排"
-                    )
-                    st.session_state["_pending_template"] = template_info
-                    st.session_state["_pending_tmpl_bytes"] = tmpl_bytes
-                    st.session_state["_pending_customer"] = new_customer
-                    st.session_state["_pending_tmpl_name"] = new_tmpl_name
+            if batch_mode:
+                if st.button("批次分析所有工作表", type="primary"):
+                    with st.spinner(f"分析 {len(sheet_names)} 個工作表..."):
+                        results = analyze_all_sheets(wb)
+                    if not results:
+                        st.error("無法分析任何工作表")
+                    else:
+                        saved, skipped = 0, 0
+                        for sname, info in results.items():
+                            try:
+                                save_template(new_customer, sname, template_to_json(info))
+                                tmpl_key = f"{new_customer}_{sname}"
+                                st.session_state.template_wb_bytes[tmpl_key] = tmpl_bytes
+                                saved += 1
+                            except Exception:
+                                skipped += 1
+                        clear_cache()
+                        st.success(f"完成！成功建立 {saved} 個模板" + (f"，{skipped} 個失敗" if skipped else ""))
+                        st.rerun()
+            else:
+                selected_sheet = st.selectbox("選擇要分析的工作表", sheet_names)
+                if not new_tmpl_name:
+                    st.info("請填寫模板名稱")
+                elif st.button("分析模板", type="primary"):
+                    with st.spinner("分析中..."):
+                        template_info = analyze_template(wb, selected_sheet)
+                    if not template_info:
+                        st.error("無法分析此工作表，請確認內容不為空")
+                    else:
+                        st.success(
+                            f"分析完成：{template_info['unit_rows']} 行/標籤，"
+                            f"每列 {template_info['units_per_row']} 個並排"
+                        )
+                        st.session_state["_pending_template"] = template_info
+                        st.session_state["_pending_tmpl_bytes"] = tmpl_bytes
+                        st.session_state["_pending_customer"] = new_customer
+                        st.session_state["_pending_tmpl_name"] = new_tmpl_name
 
         # 欄位對應確認
         if "_pending_template" in st.session_state:
@@ -383,28 +392,3 @@ with tab_invoice:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                 )
-
-
-# ════════════════════════════════════════════════════════════════
-#  已匯入記錄
-# ════════════════════════════════════════════════════════════════
-with tab_preview:
-    st.subheader("已匯入記錄")
-    try:
-        schedule = load_schedule()
-        if not schedule:
-            st.info("尚無資料")
-        else:
-            search = st.text_input("搜尋（銷貨單號 / 客戶 / 料號）")
-            rows = schedule
-            if search:
-                rows = [
-                    r for r in rows
-                    if search.lower() in str(r.get("銷貨單號", "")).lower()
-                    or search.lower() in str(r.get("客戶名稱", "")).lower()
-                    or search.lower() in str(r.get("料號", "")).lower()
-                ]
-            st.write(f"共 {len(rows)} 筆")
-            st.dataframe(rows, use_container_width=True, hide_index=True)
-    except Exception as e:
-        st.error(f"載入失敗：{e}")
