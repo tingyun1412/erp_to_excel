@@ -358,29 +358,39 @@ with tab_invoice:
     st.subheader("電子發票")
     st.caption("依照 e-invoice.com.tw V1.6 格式產生上傳檔")
 
-    orders = st.session_state.parsed_orders
-    if not orders:
+    all_orders = st.session_state.parsed_orders
+    if not all_orders:
         st.info("請先在左側上傳並解析銷貨單")
     else:
-        with st.expander("發票設定", expanded=True):
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                default_seller = next(
-                    (o.get("seller_tax_id", "") for o in orders if o.get("seller_tax_id")), ""
-                )
-                seller_id = st.text_input("賣方統編", value=default_seller)
-            with c2:
-                inv_prefix = st.text_input("發票字軌（2碼英文）", value="AA", max_chars=2)
-            with c3:
-                start_num = st.number_input("起始號碼", min_value=1, value=1)
+        # 選銷貨單
+        order_map = {
+            f"{o.get('order_no','')} — {o.get('customer_code','')} ({len(o.get('items',[]))} 項)": o
+            for o in all_orders
+        }
+        selected_keys = st.multiselect(
+            "選擇要開發票的銷貨單",
+            options=list(order_map.keys()),
+            default=list(order_map.keys()),
+        )
+        selected_orders = [order_map[k] for k in selected_keys if order_map[k].get("items")]
 
-        orders_with_items = [o for o in orders if o.get("items")]
-        st.write(f"共 {len(orders_with_items)} 張發票")
+        if selected_orders:
+            with st.expander("發票設定", expanded=True):
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    default_seller = next(
+                        (o.get("seller_tax_id","") for o in selected_orders if o.get("seller_tax_id")), ""
+                    )
+                    seller_id = st.text_input("賣方統編", value=default_seller)
+                with c2:
+                    inv_prefix = st.text_input("發票字軌（2碼英文）", value="AA", max_chars=2)
+                with c3:
+                    start_num = st.number_input("起始號碼", min_value=1, value=1)
 
-        if orders_with_items:
+            st.write(f"共 {len(selected_orders)} 張發票")
             if st.button("產出電子發票 Excel", type="primary", use_container_width=True):
                 buf = generate_invoice_excel(
-                    orders_with_items,
+                    selected_orders,
                     seller_tax_id=seller_id,
                     invoice_prefix=inv_prefix,
                     start_number=int(start_num),
@@ -392,3 +402,5 @@ with tab_invoice:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                 )
+        else:
+            st.warning("請選擇至少一張銷貨單")
