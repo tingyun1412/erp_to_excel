@@ -1,56 +1,42 @@
 """
-倉庫出貨自動化工具 v2
-- Google Sheets 當資料庫（共享、持久）
-- 出貨行事曆（網頁版，不用下載 Excel）
-- 標籤欄位自訂 + 記憶廠商設定
+出貨自動化工具 v3
+模組：
+  A - 電子發票產生
+  B - 標籤模板管理（上傳舊標籤 → 設定欄位 → 產出新標籤）
 """
-import calendar
-from collections import defaultdict
-from datetime import date, datetime
+import json
+import tempfile
+from io import BytesIO
 
 import streamlit as st
+import openpyxl
 
 from rtf_parser import parse_sales_order_rtf
 from module_b_invoice import generate_invoice_excel
-from module_c_labels import generate_labels_excel, get_all_field_names, DEFAULT_FIELDS
+from template_engine import (
+    analyze_template, generate_from_template,
+    template_to_json, template_from_json,
+    get_field_options, FIELD_LABELS, DYNAMIC_FIELDS,
+)
 from sheets_db import (
-    append_schedule_rows, load_schedule, update_schedule_status,
+    append_schedule_rows, load_schedule,
     append_order,
-    load_label_config, save_label_config, load_all_label_configs,
+    load_templates, save_template, delete_template,
 )
 
-import tempfile
-
 st.set_page_config(page_title="出貨自動化工具", page_icon="📦", layout="wide")
-
 st.title("📦 出貨自動化工具")
 
 if "parsed_orders" not in st.session_state:
     st.session_state.parsed_orders = []
-
-WEEKDAY_ZH = ["一", "二", "三", "四", "五", "六", "日"]
-STATUS_OPTIONS = ["待出貨", "已出貨", "延誤", "取消"]
-STATUS_COLOR = {
-    "待出貨": "#2E86C1",
-    "已出貨": "#27AE60",
-    "延誤":   "#E67E22",
-    "取消":   "#95A5A6",
-}
+if "template_wb_bytes" not in st.session_state:
+    st.session_state.template_wb_bytes = {}  # {template_key: bytes}
 
 
 def _fmt_date_display(d: str) -> str:
     if len(d) == 8:
         return f"{d[:4]}/{d[4:6]}/{d[6:8]}"
     return d
-
-
-def _parse_date(d: str):
-    for fmt in ["%Y/%m/%d", "%Y%m%d"]:
-        try:
-            return datetime.strptime(d, fmt).date()
-        except ValueError:
-            pass
-    return None
 
 
 # ════════════════════════════════════════════════════════════════
@@ -79,15 +65,16 @@ with st.sidebar:
                     except Exception as e:
                         errors.append(f"{uf.name}: {e}")
 
-            if errors:
-                for err in errors:
-                    st.error(err)
+            for err in errors:
+                st.error(err)
 
             if orders:
-                # 匯入 Sheets
                 schedule_rows = []
                 for order in orders:
-                    append_order(order)
+                    try:
+                        append_order(order)
+                    except Exception:
+                        pass
                     for item in order.get("items", []):
                         schedule_rows.append({
                             "銷貨單號":   order.get("order_no", ""),
@@ -102,15 +89,18 @@ with st.sidebar:
                             "狀態":       "待出貨",
                             "備註":       "",
                         })
+                try:
+                    added = append_schedule_rows(schedule_rows)
+                    st.success(f"解析完成，新增 {added} 筆到 Google Sheets")
+                except Exception as e:
+                    st.warning(f"本地解析成功，但寫入 Sheets 失敗：{e}")
 
-                added = append_schedule_rows(schedule_rows)
                 st.session_state.parsed_orders = orders
-                st.success(f"新增 {added} 筆，已存在的自動略過")
                 st.rerun()
 
     st.divider()
     if st.session_state.parsed_orders:
-        st.success(f"本次解析：{len(st.session_state.parsed_orders)} 張")
+        st.success(f"已載入 {len(st.session_state.parsed_orders)} 張銷貨單")
         if st.button("清除暫存", use_container_width=True):
             st.session_state.parsed_orders = []
             st.rerun()
@@ -119,221 +109,239 @@ with st.sidebar:
 # ════════════════════════════════════════════════════════════════
 #  主頁籤
 # ════════════════════════════════════════════════════════════════
-tab_cal, tab_import, tab_b, tab_c = st.tabs([
-    "📅 出貨行事曆",
-    "📋 匯入記錄",
-    "🧾 電子發票",
+tab_label, tab_invoice, tab_preview = st.tabs([
     "🏷 出貨標籤",
+    "🧾 電子發票",
+    "📋 已匯入記錄",
 ])
 
 
-# ── 出貨行事曆 ────────────────────────────────────────────────────
-with tab_cal:
-    st.subheader("出貨行事曆")
+# ════════════════════════════════════════════════════════════════
+#  標籤模板管理
+# ════════════════════════════════════════════════════════════════
+with tab_label:
+    st.subheader("出貨標籤")
 
-    col_nav1, col_nav2, col_nav3, _ = st.columns([1, 3, 1, 3])
-    today = date.today()
+    sub_tab_use, sub_tab_manage = st.tabs(["產出標籤", "管理模板"])
 
-    if "cal_year"  not in st.session_state: st.session_state.cal_year  = today.year
-    if "cal_month" not in st.session_state: st.session_state.cal_month = today.month
+    # ── 產出標籤 ──────────────────────────────────────────────
+    with sub_tab_use:
+        orders = st.session_state.parsed_orders
 
-    with col_nav1:
-        if st.button("◀ 上個月"):
-            if st.session_state.cal_month == 1:
-                st.session_state.cal_month = 12
-                st.session_state.cal_year -= 1
-            else:
-                st.session_state.cal_month -= 1
-            st.rerun()
-
-    with col_nav2:
-        tw_year = st.session_state.cal_year - 1911
-        st.markdown(
-            f"<div style='text-align:center;font-size:20px;font-weight:bold;padding:6px 0'>"
-            f"{st.session_state.cal_year}/{st.session_state.cal_month:02d}"
-            f"&nbsp;&nbsp;（民國 {tw_year} 年）</div>",
-            unsafe_allow_html=True,
-        )
-
-    with col_nav3:
-        if st.button("下個月 ▶"):
-            if st.session_state.cal_month == 12:
-                st.session_state.cal_month = 1
-                st.session_state.cal_year += 1
-            else:
-                st.session_state.cal_month += 1
-            st.rerun()
-
-    # 載入資料
-    with st.spinner("載入出貨排程..."):
-        try:
-            schedule = load_schedule()
-        except Exception as e:
-            st.error(f"無法連接資料庫：{e}")
-            schedule = []
-
-    # 依日期分組
-    by_date = defaultdict(list)
-    for i, row in enumerate(schedule):
-        d = _parse_date(str(row.get("出貨日期", "")))
-        if d:
-            by_date[d].append({**row, "_row_index": i + 1})
-
-    # 畫月曆
-    year  = st.session_state.cal_year
-    month = st.session_state.cal_month
-    cal   = calendar.monthcalendar(year, month)
-
-    # 星期標題
-    header_cols = st.columns(7)
-    for ci, wd in enumerate(WEEKDAY_ZH):
-        bg = "#f0f0f0" if ci < 5 else "#fff3cd"
-        header_cols[ci].markdown(
-            f"<div style='background:{bg};text-align:center;"
-            f"padding:6px;border-radius:4px;font-weight:bold'>{wd}</div>",
-            unsafe_allow_html=True,
-        )
-
-    for week in cal:
-        week_cols = st.columns(7)
-        for ci, day_num in enumerate(week):
-            with week_cols[ci]:
-                if day_num == 0:
-                    st.markdown("<div style='min-height:80px'></div>", unsafe_allow_html=True)
-                    continue
-
-                d = date(year, month, day_num)
-                items_today = by_date.get(d, [])
-                is_today = (d == today)
-                is_weekend = ci >= 5
-
-                day_bg = "#FFF9C4" if is_today else ("#FFF8E1" if is_weekend else "#FFFFFF")
-                day_border = "2px solid #F39C12" if is_today else "1px solid #ddd"
-
-                # 日期格
-                html = (
-                    f"<div style='background:{day_bg};border:{day_border};"
-                    f"border-radius:6px;padding:6px;min-height:80px'>"
-                    f"<div style='font-weight:bold;font-size:14px'>{day_num}</div>"
-                )
-                for item in items_today[:3]:
-                    status   = item.get("狀態", "待出貨")
-                    color    = STATUS_COLOR.get(status, "#888")
-                    customer = item.get("客戶名稱", "")
-                    item_no  = item.get("料號", "")
-                    qty      = item.get("數量", "")
-                    cust_no  = item.get("客戶料號", "")
-                    order_no = item.get("銷貨單號", "")
-                    # tooltip 顯示完整資訊
-                    tooltip  = f"{customer} | {item_no} | {qty} | {cust_no} | {order_no}"
-                    # 格內顯示：客戶名稱 / 料號 / 數量
-                    lines = []
-                    if customer: lines.append(customer)
-                    if item_no:  lines.append(item_no)
-                    if qty:      lines.append(f"× {qty}")
-                    if cust_no:  lines.append(f"({cust_no})")
-                    display = "  ".join(lines)
-                    html += (
-                        f"<div style='background:{color};color:white;"
-                        f"border-radius:3px;padding:3px 5px;margin-top:3px;"
-                        f"font-size:10px;line-height:1.4;word-break:break-all'"
-                        f" title='{tooltip}'>{display}</div>"
-                    )
-                if len(items_today) > 3:
-                    html += f"<div style='font-size:10px;color:#888'>+{len(items_today)-3} 筆</div>"
-                html += "</div>"
-                st.markdown(html, unsafe_allow_html=True)
-
-    # 當月明細表
-    st.divider()
-    st.markdown("**當月出貨明細**")
-
-    month_items = []
-    for d, items in by_date.items():
-        if d.year == year and d.month == month:
-            month_items.extend(items)
-
-    if not month_items:
-        st.info("本月尚無出貨記錄")
-    else:
-        # 狀態篩選
-        filter_status = st.multiselect(
-            "篩選狀態",
-            STATUS_OPTIONS,
-            default=["待出貨", "延誤"],
-        )
-        filtered = [r for r in month_items if r.get("狀態", "") in filter_status]
-
-        for row in sorted(filtered, key=lambda x: str(x.get("出貨日期", ""))):
-            status = row.get("狀態", "待出貨")
-            color  = STATUS_COLOR.get(status, "#888")
-            with st.expander(
-                f"{row.get('出貨日期','')}　{row.get('客戶名稱','')}　"
-                f"{row.get('料號','')}　× {row.get('數量','')}",
-                expanded=False,
-            ):
-                c1, c2, c3 = st.columns([2, 2, 2])
-                with c1:
-                    st.write(f"**品名：** {row.get('品名','')}")
-                    st.write(f"**客戶料號：** {row.get('客戶料號','')}")
-                    st.write(f"**客戶訂單：** {row.get('客戶訂單號','')}")
-                with c2:
-                    st.write(f"**銷貨單號：** {row.get('銷貨單號','')}")
-                    st.write(f"**備註：** {row.get('備註','')}")
-                with c3:
-                    new_status = st.selectbox(
-                        "狀態",
-                        STATUS_OPTIONS,
-                        index=STATUS_OPTIONS.index(status) if status in STATUS_OPTIONS else 0,
-                        key=f"status_{row.get('_row_index')}",
-                    )
-                    new_remark = st.text_input(
-                        "備註",
-                        value=row.get("備註", ""),
-                        key=f"remark_{row.get('_row_index')}",
-                    )
-                    if st.button("儲存", key=f"save_{row.get('_row_index')}"):
-                        try:
-                            update_schedule_status(
-                                row["_row_index"], new_status, new_remark
-                            )
-                            st.success("已更新")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"更新失敗：{e}")
-
-
-# ── 匯入記錄 ─────────────────────────────────────────────────────
-with tab_import:
-    st.subheader("匯入記錄")
-    try:
-        schedule = load_schedule()
-        if not schedule:
-            st.info("尚無資料")
+        if not orders:
+            st.info("請先在左側上傳並解析銷貨單")
         else:
-            # 搜尋
-            search = st.text_input("搜尋（銷貨單號 / 客戶 / 料號）")
-            rows = schedule
-            if search:
-                rows = [
-                    r for r in rows
-                    if search.lower() in str(r.get("銷貨單號","")).lower()
-                    or search.lower() in str(r.get("客戶名稱","")).lower()
-                    or search.lower() in str(r.get("料號","")).lower()
+            # 載入所有模板
+            try:
+                all_templates = load_templates()
+            except Exception as e:
+                st.error(f"載入模板失敗：{e}")
+                all_templates = []
+
+            if not all_templates:
+                st.warning("尚無任何標籤模板，請先到「管理模板」上傳")
+            else:
+                # 選模板
+                template_options = [
+                    f"{r['廠商名稱']} — {r['模板名稱']}"
+                    for r in all_templates
                 ]
-            st.write(f"共 {len(rows)} 筆")
-            st.dataframe(
-                rows,
-                use_container_width=True,
-                hide_index=True,
-                column_order=["出貨日期","銷貨單號","客戶名稱","料號","品名","數量","單位","客戶料號","客戶訂單號","狀態","備註"],
-            )
-    except Exception as e:
-        st.error(f"載入失敗：{e}")
+                selected_idx = st.selectbox(
+                    "選擇標籤模板",
+                    options=range(len(template_options)),
+                    format_func=lambda i: template_options[i],
+                )
+                selected_record = all_templates[selected_idx]
+                template_info = template_from_json(selected_record["設定JSON"])
+
+                # 顯示模板資訊
+                with st.expander("模板欄位設定預覽"):
+                    cells = template_info.get("cells", [])
+                    if cells:
+                        st.dataframe(
+                            [{"位置": f"R{c['row']}C{c['col']}", "原始值": c['value'], "對應欄位": c['field']} for c in cells],
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                st.info(
+                    f"模板：{selected_record['廠商名稱']} — {selected_record['模板名稱']}　"
+                    f"｜　標籤單元 {template_info.get('unit_rows')} 行　"
+                    f"｜　每列 {template_info.get('units_per_row')} 個並排"
+                )
+
+                # 品項列表
+                all_items = [(item, order) for order in orders for item in order.get("items", [])]
+                st.write(f"共 {len(all_items)} 個品項，每個品項依數量產生對應張數標籤")
+
+                # 需要原始模板 workbook 才能複製樣式
+                tmpl_key = f"{selected_record['廠商名稱']}_{selected_record['模板名稱']}"
+                has_wb = tmpl_key in st.session_state.template_wb_bytes
+
+                if not has_wb:
+                    st.warning("需要上傳原始模板 Excel 才能保留完整樣式（字型/框線等）")
+                    re_upload = st.file_uploader(
+                        "重新上傳此廠商的模板 Excel",
+                        type=["xlsx", "xls"],
+                        key=f"reupload_{tmpl_key}",
+                    )
+                    if re_upload:
+                        st.session_state.template_wb_bytes[tmpl_key] = re_upload.read()
+                        st.rerun()
+
+                if st.button("產出標籤 Excel", type="primary", use_container_width=True):
+                    with st.spinner("產出中..."):
+                        try:
+                            wb_bytes = st.session_state.template_wb_bytes.get(tmpl_key)
+                            if wb_bytes:
+                                from io import BytesIO as _BytesIO
+                                template_wb = openpyxl.load_workbook(_BytesIO(wb_bytes))
+                            else:
+                                template_wb = openpyxl.Workbook()
+
+                            buf = generate_from_template(template_info, orders, template_wb)
+                            st.download_button(
+                                "⬇️ 下載標籤.xlsx",
+                                data=buf,
+                                file_name=f"標籤_{selected_record['廠商名稱']}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                use_container_width=True,
+                            )
+                        except Exception as e:
+                            st.error(f"產出失敗：{e}")
+                            import traceback
+                            st.code(traceback.format_exc())
+
+    # ── 管理模板 ──────────────────────────────────────────────
+    with sub_tab_manage:
+        st.markdown("### 上傳新模板")
+        st.caption("上傳舊的標籤 Excel，系統自動分析格式，讓你確認欄位對應後存檔")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            new_customer = st.text_input("廠商名稱", placeholder="例：晶晟")
+        with col2:
+            new_tmpl_name = st.text_input("模板名稱", placeholder="例：標準出貨標籤")
+
+        uploaded_tmpl = st.file_uploader(
+            "上傳標籤 Excel 範本",
+            type=["xlsx", "xls"],
+            key="new_template_upload",
+        )
+
+        if uploaded_tmpl and new_customer and new_tmpl_name:
+            tmpl_bytes = uploaded_tmpl.read()
+            wb = openpyxl.load_workbook(BytesIO(tmpl_bytes))
+
+            sheet_names = wb.sheetnames
+            selected_sheet = st.selectbox("選擇要分析的工作表", sheet_names)
+
+            if st.button("分析模板", type="primary"):
+                with st.spinner("分析中..."):
+                    template_info = analyze_template(wb, selected_sheet)
+
+                if not template_info:
+                    st.error("無法分析此工作表，請確認內容不為空")
+                else:
+                    st.success(
+                        f"分析完成：{template_info['unit_rows']} 行/標籤，"
+                        f"每列 {template_info['units_per_row']} 個並排"
+                    )
+                    st.session_state["_pending_template"] = template_info
+                    st.session_state["_pending_tmpl_bytes"] = tmpl_bytes
+                    st.session_state["_pending_customer"] = new_customer
+                    st.session_state["_pending_tmpl_name"] = new_tmpl_name
+
+        # 欄位對應確認
+        if "_pending_template" in st.session_state:
+            template_info = st.session_state["_pending_template"]
+            cells = template_info.get("cells", [])
+
+            st.divider()
+            st.markdown("### 確認欄位對應")
+            st.caption("檢查每個格子的欄位是否正確，可以修改")
+
+            field_options = ["__fixed__（固定文字）"] + [
+                f"{k}（{v}）" for k, v in DYNAMIC_FIELDS.items() if k != "固定文字"
+            ]
+
+            updated_cells = []
+            for i, cell in enumerate(cells):
+                c1, c2, c3 = st.columns([1, 3, 3])
+                with c1:
+                    st.text(f"R{cell['row']}C{cell['col']}")
+                with c2:
+                    st.text(cell['value'][:40] if cell['value'] else "")
+                with c3:
+                    current = cell.get("field", "__fixed__")
+                    # 找目前值在選項中的位置
+                    curr_display = next(
+                        (opt for opt in field_options if opt.startswith(current)),
+                        field_options[0]
+                    )
+                    chosen = st.selectbox(
+                        "欄位",
+                        field_options,
+                        index=field_options.index(curr_display) if curr_display in field_options else 0,
+                        key=f"field_map_{i}",
+                        label_visibility="collapsed",
+                    )
+                    # 取出 key（括號前）
+                    new_field = chosen.split("（")[0]
+                    updated_cell = {**cell, "field": new_field}
+                    updated_cells.append(updated_cell)
+
+            if st.button("儲存模板", type="primary", use_container_width=True):
+                template_info["cells"] = updated_cells
+                config_json = template_to_json(template_info)
+                customer = st.session_state["_pending_customer"]
+                tmpl_name = st.session_state["_pending_tmpl_name"]
+                tmpl_key = f"{customer}_{tmpl_name}"
+
+                try:
+                    save_template(customer, tmpl_name, config_json)
+                    # 快取 workbook bytes
+                    st.session_state.template_wb_bytes[tmpl_key] = st.session_state["_pending_tmpl_bytes"]
+                    # 清除暫存
+                    del st.session_state["_pending_template"]
+                    del st.session_state["_pending_tmpl_bytes"]
+                    del st.session_state["_pending_customer"]
+                    del st.session_state["_pending_tmpl_name"]
+                    st.success(f"模板「{customer} — {tmpl_name}」已儲存！")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"儲存失敗：{e}")
+
+        # 現有模板列表
+        st.divider()
+        st.markdown("### 現有模板")
+        try:
+            all_templates = load_templates()
+            if not all_templates:
+                st.info("尚無模板")
+            else:
+                for r in all_templates:
+                    with st.expander(f"{r['廠商名稱']} — {r['模板名稱']}　（更新：{r.get('最後更新','')}）"):
+                        info = template_from_json(r["設定JSON"])
+                        st.write(f"標籤行數：{info.get('unit_rows')}，並排數：{info.get('units_per_row')}")
+                        cells = info.get("cells", [])
+                        dynamic = [c for c in cells if c.get("field") != "__fixed__"]
+                        st.write(f"動態欄位：{[c['field'] for c in dynamic]}")
+                        if st.button("刪除此模板", key=f"del_{r['廠商名稱']}_{r['模板名稱']}"):
+                            try:
+                                delete_template(r["廠商名稱"], r["模板名稱"])
+                                st.success("已刪除")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"刪除失敗：{e}")
+        except Exception as e:
+            st.error(f"載入失敗：{e}")
 
 
-# ── 電子發票 ─────────────────────────────────────────────────────
-with tab_b:
+# ════════════════════════════════════════════════════════════════
+#  電子發票
+# ════════════════════════════════════════════════════════════════
+with tab_invoice:
     st.subheader("電子發票")
     st.caption("依照 e-invoice.com.tw V1.6 格式產生上傳檔")
 
@@ -345,7 +353,7 @@ with tab_b:
             c1, c2, c3 = st.columns(3)
             with c1:
                 default_seller = next(
-                    (o.get("seller_tax_id","") for o in orders if o.get("seller_tax_id")), ""
+                    (o.get("seller_tax_id", "") for o in orders if o.get("seller_tax_id")), ""
                 )
                 seller_id = st.text_input("賣方統編", value=default_seller)
             with c2:
@@ -373,108 +381,26 @@ with tab_b:
                 )
 
 
-# ── 出貨標籤 ─────────────────────────────────────────────────────
-with tab_c:
-    st.subheader("出貨標籤")
-
-    orders = st.session_state.parsed_orders
-    if not orders:
-        st.info("請先在左側上傳並解析銷貨單")
-    else:
-        all_fields = get_all_field_names()
-
-        # 找出本批次涉及的廠商
-        customers = list({
-            item.get("customer", "")
-            for o in orders for item in o.get("items", [])
-            if item.get("customer")
-        })
-
-        # 廠商選擇
-        selected_customer = st.selectbox(
-            "選擇廠商套用設定",
-            options=["（不套用記憶設定）"] + customers,
-        )
-
-        # 讀取記憶設定
-        saved_fields = None
-        if selected_customer != "（不套用記憶設定）":
-            try:
-                saved_fields = load_label_config(selected_customer)
-            except Exception:
-                saved_fields = None
-
-        default_selection = saved_fields if saved_fields else DEFAULT_FIELDS
-
-        st.markdown("**選擇並排列欄位**")
-        st.caption("勾選要顯示的欄位，上下拖曳調整順序（用數字輸入框調整優先序）")
-
-        # 用數字輸入讓使用者設定順序
-        field_orders = {}
-        checked_fields = {}
-
-        cols = st.columns(3)
-        for i, field in enumerate(all_fields):
-            with cols[i % 3]:
-                is_checked = field in default_selection
-                checked = st.checkbox(field, value=is_checked, key=f"chk_{field}")
-                checked_fields[field] = checked
-                if checked:
-                    current_order = (
-                        default_selection.index(field) + 1
-                        if field in default_selection
-                        else len(default_selection) + i + 1
-                    )
-                    order_val = st.number_input(
-                        f"順序",
-                        min_value=1, max_value=20,
-                        value=current_order,
-                        key=f"ord_{field}",
-                        label_visibility="collapsed",
-                    )
-                    field_orders[field] = order_val
-
-        # 依順序排列選取的欄位
-        selected_fields = sorted(
-            [f for f, checked in checked_fields.items() if checked],
-            key=lambda f: field_orders.get(f, 99),
-        )
-
-        if selected_fields:
-            st.markdown(f"**預覽順序：** {' → '.join(selected_fields)}")
-
-        c1, c2 = st.columns(2)
-        with c1:
-            if selected_customer != "（不套用記憶設定）" and selected_fields:
-                if st.button(f"💾 記住「{selected_customer}」的設定", use_container_width=True):
-                    try:
-                        save_label_config(selected_customer, selected_fields)
-                        st.success("已儲存")
-                    except Exception as e:
-                        st.error(f"儲存失敗：{e}")
-
-        with c2:
-            if selected_fields:
-                if st.button("產出標籤 Excel", type="primary", use_container_width=True):
-                    buf = generate_labels_excel(orders, fields=selected_fields)
-                    st.download_button(
-                        "⬇️ 下載出貨標籤.xlsx",
-                        data=buf,
-                        file_name="出貨標籤.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
-                    )
-            else:
-                st.warning("請至少勾選一個欄位")
-
-        # 顯示所有廠商記憶設定
-        with st.expander("所有廠商的已儲存設定"):
-            try:
-                all_configs = load_all_label_configs()
-                if all_configs:
-                    for cust, fields in all_configs.items():
-                        st.write(f"**{cust}**：{' → '.join(fields)}")
-                else:
-                    st.info("尚無儲存的設定")
-            except Exception as e:
-                st.error(f"載入失敗：{e}")
+# ════════════════════════════════════════════════════════════════
+#  已匯入記錄
+# ════════════════════════════════════════════════════════════════
+with tab_preview:
+    st.subheader("已匯入記錄")
+    try:
+        schedule = load_schedule()
+        if not schedule:
+            st.info("尚無資料")
+        else:
+            search = st.text_input("搜尋（銷貨單號 / 客戶 / 料號）")
+            rows = schedule
+            if search:
+                rows = [
+                    r for r in rows
+                    if search.lower() in str(r.get("銷貨單號", "")).lower()
+                    or search.lower() in str(r.get("客戶名稱", "")).lower()
+                    or search.lower() in str(r.get("料號", "")).lower()
+                ]
+            st.write(f"共 {len(rows)} 筆")
+            st.dataframe(rows, use_container_width=True, hide_index=True)
+    except Exception as e:
+        st.error(f"載入失敗：{e}")

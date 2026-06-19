@@ -58,36 +58,16 @@ def get_sheet(sheet_name: str):
 
 # ── 出貨排程 ──────────────────────────────────────────────────────
 
-def _rows_to_records(rows: list[list], headers: list[str]) -> list[dict]:
-    """
-    把 get_all_values() 的原始列表轉成 dict，跳過全空列。
-    自動偵測第一列是否為標題列（若第一欄內容與 headers[0] 相同則跳過）。
-    """
-    if not rows:
-        return []
-    first_row = rows[0]
-    start = 1 if (first_row and str(first_row[0]).strip() == headers[0]) else 0
-    records = []
-    for row in rows[start:]:
-        if not any(str(c).strip() for c in row):
-            continue
-        record = {h: (row[i] if i < len(row) else "") for i, h in enumerate(headers)}
-        records.append(record)
-    return records
-
-
 def load_schedule() -> list[dict]:
     ws = get_sheet(SHEET_SCHEDULE)
-    rows = ws.get_all_values()
-    if not rows:
-        return []
-    return _rows_to_records(rows, SCHEDULE_HEADERS)
+    records = ws.get_all_records()
+    return records
 
 
 def append_schedule_rows(rows: list[dict]):
     """新增出貨排程資料，跳過已存在的銷貨單號+料號組合"""
     ws = get_sheet(SHEET_SCHEDULE)
-    existing = _rows_to_records(ws.get_all_values(), SCHEDULE_HEADERS)
+    existing = ws.get_all_records()
     existing_keys = {
         (str(r.get("銷貨單號", "")), str(r.get("料號", "")))
         for r in existing
@@ -132,15 +112,12 @@ def update_schedule_status(row_index: int, status: str, remark: str = ""):
 
 def load_orders() -> list[dict]:
     ws = get_sheet(SHEET_ORDERS)
-    rows = ws.get_all_values()
-    if not rows:
-        return []
-    return _rows_to_records(rows, ORDERS_HEADERS)
+    return ws.get_all_records()
 
 
 def append_order(order: dict):
     ws = get_sheet(SHEET_ORDERS)
-    existing = _rows_to_records(ws.get_all_values(), ORDERS_HEADERS)
+    existing = ws.get_all_records()
     if any(str(r.get("銷貨單號")) == str(order.get("order_no")) for r in existing):
         return False  # 已存在
     now = datetime.now().strftime("%Y/%m/%d %H:%M")
@@ -162,8 +139,7 @@ def append_order(order: dict):
 def load_label_config(customer: str) -> list[str] | None:
     """讀取廠商的標籤欄位順序，找不到回傳 None"""
     ws = get_sheet(SHEET_LABELS)
-    rows = ws.get_all_values()
-    records = _rows_to_records(rows, LABELS_HEADERS) if rows else []
+    records = ws.get_all_records()
     for r in records:
         if r.get("廠商名稱") == customer:
             fields_str = r.get("欄位順序", "")
@@ -175,8 +151,7 @@ def load_label_config(customer: str) -> list[str] | None:
 def save_label_config(customer: str, fields: list[str]):
     """儲存廠商的標籤欄位順序"""
     ws = get_sheet(SHEET_LABELS)
-    rows = ws.get_all_values()
-    records = _rows_to_records(rows, LABELS_HEADERS) if rows else []
+    records = ws.get_all_records()
     now = datetime.now().strftime("%Y/%m/%d %H:%M")
     fields_str = ", ".join(fields)
 
@@ -193,8 +168,7 @@ def save_label_config(customer: str, fields: list[str]):
 def load_all_label_configs() -> dict[str, list[str]]:
     """讀取所有廠商的標籤設定"""
     ws = get_sheet(SHEET_LABELS)
-    rows = ws.get_all_values()
-    records = _rows_to_records(rows, LABELS_HEADERS) if rows else []
+    records = ws.get_all_records()
     result = {}
     for r in records:
         name = r.get("廠商名稱", "")
@@ -202,3 +176,47 @@ def load_all_label_configs() -> dict[str, list[str]]:
         if name and fields_str:
             result[name] = [f.strip() for f in fields_str.split(",")]
     return result
+
+
+# ── 廠商標籤模板 ──────────────────────────────────────────────────
+SHEET_TEMPLATES = "標籤模板"
+TEMPLATES_HEADERS = ["廠商名稱", "模板名稱", "設定JSON", "最後更新"]
+
+
+def load_templates(customer: str = "") -> list[dict]:
+    """載入所有（或指定廠商的）標籤模板"""
+    ws = get_sheet(SHEET_TEMPLATES)
+    rows = ws.get_all_values()
+    records = _rows_to_records(rows, TEMPLATES_HEADERS) if rows else []
+    if customer:
+        return [r for r in records if r.get("廠商名稱") == customer]
+    return records
+
+
+def save_template(customer: str, template_name: str, config_json: str):
+    """儲存或更新廠商標籤模板"""
+    ws = get_sheet(SHEET_TEMPLATES)
+    rows = ws.get_all_values()
+    records = _rows_to_records(rows, TEMPLATES_HEADERS) if rows else []
+    now = datetime.now().strftime("%Y/%m/%d %H:%M")
+
+    for i, r in enumerate(records):
+        if r.get("廠商名稱") == customer and r.get("模板名稱") == template_name:
+            data_row = i + 2
+            ws.update_cell(data_row, 3, config_json)
+            ws.update_cell(data_row, 4, now)
+            return
+
+    ws.append_row([customer, template_name, config_json, now])
+
+
+def delete_template(customer: str, template_name: str):
+    """刪除廠商標籤模板"""
+    ws = get_sheet(SHEET_TEMPLATES)
+    rows = ws.get_all_values()
+    records = _rows_to_records(rows, TEMPLATES_HEADERS) if rows else []
+
+    for i, r in enumerate(records):
+        if r.get("廠商名稱") == customer and r.get("模板名稱") == template_name:
+            ws.delete_rows(i + 2)
+            return
