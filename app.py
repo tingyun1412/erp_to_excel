@@ -195,9 +195,12 @@ with tab_label:
                         height=min(420, 38 * (len(selected_items) + 1) + 10),
                         column_config={
                             "銷貨單號": st.column_config.TextColumn(width="medium"),
-                            "批號":     st.column_config.TextColumn(width="medium"),
                             "料號":     st.column_config.TextColumn(width="large"),
-                            "規格":     st.column_config.TextColumn(width="medium"),
+                            "品名":     st.column_config.TextColumn(width="small"),
+                            "規格":     st.column_config.TextColumn(width="large"),
+                            "數量":     st.column_config.NumberColumn(width="small"),
+                            "客戶料號": st.column_config.TextColumn(width="medium"),
+                            "批號":     st.column_config.TextColumn(width="medium"),
                         },
                     )
                     st.caption(f"共 {len(selected_items)} 個品項，每張銷貨單一個工作表")
@@ -476,7 +479,7 @@ with tab_label:
             with st.spinner("連線 ERP 並下載中，請稍候..."):
                 try:
                     from erp_downloader import download_label_pdfs, pack_zip
-                    results = download_label_pdfs(selected_nos, erp_user, erp_pass)
+                    results, erp_errors = download_label_pdfs(selected_nos, erp_user, erp_pass)
 
                     success = {no: data for no, data in results.items() if data}
                     failed  = [no for no, data in results.items() if not data]
@@ -516,6 +519,9 @@ with tab_label:
 
                     if failed:
                         st.warning(f"以下出貨單下載失敗（ERP 端）：{', '.join(failed)}")
+                        for _no in failed:
+                            if _no in erp_errors:
+                                st.code(f"[{_no}] {erp_errors[_no]}")
                     if not success and not failed:
                         st.error("未取得任何 PDF，請確認 ERP 帳密與網路連線")
 

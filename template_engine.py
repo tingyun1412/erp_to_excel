@@ -527,8 +527,28 @@ def _copy_sheet_images(ws_src, ws_dst, row_offset: int = 0):
             # 優先從 anchor extent 取顯示尺寸（EMU → 像素），比 img.width/height 準確
             w, h = None, None
             if hasattr(anchor, 'ext') and getattr(anchor.ext, 'cx', None):
+                # OneCellAnchor / AbsoluteAnchor → 直接有 cx/cy (EMU)
                 w = int(anchor.ext.cx / 914400 * 96)
                 h = int(anchor.ext.cy / 914400 * 96)
+            elif hasattr(anchor, '_from') and hasattr(anchor, 'to'):
+                # TwoCellAnchor → 由儲存格寬高推算
+                try:
+                    fc, tc = anchor._from.col, anchor.to.col
+                    fr, tr_ = anchor._from.row, anchor.to.row
+                    # 欄寬：Excel 字元寬度單位，~7 px/char（預設 8.43 char）
+                    w = sum(
+                        int((ws_src.column_dimensions[get_column_letter(c+1)].width or 8.43) * 7)
+                        for c in range(fc, tc + 1)
+                    )
+                    # 列高：點數，1pt ≈ 4/3 px（預設 15pt）
+                    h = sum(
+                        int((ws_src.row_dimensions[r+1].height or 15) * 4 / 3)
+                        for r in range(fr, tr_ + 1)
+                    )
+                    if w <= 0 or h <= 0:
+                        w, h = None, None
+                except Exception:
+                    w, h = None, None
             elif img.width:
                 w, h = img.width, img.height
 

@@ -18,15 +18,17 @@ def download_label_pdfs(
     username: str = "BR026",
     password: str = "5403",
     debug_dir: str = None,
-) -> dict:
+) -> tuple[dict, dict]:
     """
     登入 ERP，依出貨單號下載標籤 PDF。
-    回傳 {order_no: pdf_bytes | None}
-    debug_dir 非 None 時每步截圖到該目錄（方便除錯）。
+    回傳 (results, errors)
+      results: {order_no: pdf_bytes | None}
+      errors:  {order_no: error_str}  — 失敗原因
     """
     from playwright.sync_api import sync_playwright
 
     results = {no: None for no in order_nos}
+    errors: dict = {}
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
@@ -48,11 +50,11 @@ def download_label_pdfs(
                 results[order_no] = pdf
             except Exception as e:
                 dbg(f"error_{order_no}")
-                print(f"[ERP] {order_no} 下載失敗：{e}")
+                errors[order_no] = str(e)
 
         browser.close()
 
-    return results
+    return results, errors
 
 
 def pack_zip(results: dict) -> bytes:
@@ -120,7 +122,24 @@ def _download_one(page, order_no: str, dbg) -> bytes:
     # 找含出貨單號的列
     row = page.locator(f"tr:has-text('{order_no}')").first
     if row.count() == 0:
-        raise RuntimeError(f"找不到出貨單 {order_no}")
+        # 嘗試搜尋欄位
+        search_inputs = page.locator("input[type='text']:visible")
+        if search_inputs.count() > 0:
+            search_inputs.first.fill(order_no)
+            search_inputs.first.press("Enter")
+            page.wait_for_load_state("networkidle", timeout=15_000)
+            row = page.locator(f"tr:has-text('{order_no}')").first
+
+    if row.count() == 0:
+        # 截下頁面 title + URL + 前 500 字 HTML 供除錯
+        url = page.url
+        title = page.title()
+        html_preview = page.inner_text("body")[:500].replace("\n", " ")
+        raise RuntimeError(
+            f"找不到出貨單 {order_no}。"
+            f"當前頁：{title} | {url}\n"
+            f"頁面內容預覽：{html_preview}"
+        )
 
     # 點「標籤」按鈕
     row.locator("text=標籤").first.click()
