@@ -121,14 +121,36 @@ with tab_label:
                 st.warning("尚無任何標籤模板，請先到「管理模板」上傳")
             else:
                 def _match_template(customer_name: str):
-                    """找廠商名稱與客戶名稱有包含關係的模板（第一個符合的）"""
+                    """廠商名稱比對：先完全包含，再找最長公共子字串 ≥ 3 字"""
                     if not customer_name:
                         return None
+
+                    def _lcs_len(a: str, b: str) -> int:
+                        best = 0
+                        for i in range(len(a)):
+                            for j in range(len(b)):
+                                l = 0
+                                while i + l < len(a) and j + l < len(b) and a[i + l] == b[j + l]:
+                                    l += 1
+                                if l > best:
+                                    best = l
+                        return best
+
+                    # 1. 優先：完全包含（原邏輯）
                     for r in all_templates:
                         vendor = r.get("廠商名稱", "")
                         if vendor and (vendor in customer_name or customer_name in vendor):
                             return r
-                    return None
+
+                    # 2. 次要：最長公共子字串 ≥ 3 字
+                    best_rec, best_len = None, 2
+                    for r in all_templates:
+                        vendor = r.get("廠商名稱", "")
+                        if vendor:
+                            ln = _lcs_len(customer_name, vendor)
+                            if ln > best_len:
+                                best_len, best_rec = ln, r
+                    return best_rec
 
                 # 選銷貨單
                 order_options = {

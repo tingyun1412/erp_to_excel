@@ -113,7 +113,17 @@ def _login(page, username, password, dbg):
 
 
 def _go_to_ship_orders(page, dbg):
-    page.locator("text=出貨單").first.click()
+    # 每次都從首頁重新進入，避免前一張下載完後卡在標籤頁
+    page.goto(ERP_INDEX, timeout=30_000)
+    page.wait_for_load_state("domcontentloaded")
+
+    # 優先找按鈕或連結，fallback 任意元素
+    for sel in ["button:has-text('出貨單')", "a:has-text('出貨單')", "text=出貨單"]:
+        loc = page.locator(sel)
+        if loc.count() > 0:
+            loc.first.click()
+            break
+
     page.wait_for_load_state("networkidle", timeout=20_000)
     dbg("03_order_list")
 

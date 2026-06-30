@@ -14,6 +14,9 @@ from pathlib import Path
 
 _FOOTER_STOP = {"以下空白"}
 
+# 簽收區的前綴文字 — 出現就代表進入簽收區，應停止收集品項資料
+_SIGNING_PREFIXES = ("業務：", "審核：", "經辦人：", "客戶簽收：")
+
 # 換頁時會重複印出的表頭/簽收區標籤，解析品名/規格時應跳過（不可當作品名）
 _HEADER_NOISE_LABELS = {
     "客戶代號", "客戶名稱", "聯", "絡", "人", "統一編號", "送貨地址",
@@ -234,14 +237,21 @@ def parse_sales_order_rtf(file_path) -> dict:
     if not result["order_date"] and result["order_no"]:
         result["order_date"] = result["order_no"][:8]
 
-    # 找出所有緊接在員工標籤（業務：/ 審核：/ 經辦人：）後的中文名字，排除出品項
-    _STAFF_LABELS = {"業務：", "審核：", "經辦人：", "客戶簽收："}
+    # 找出簽收區人名，排除出品項（兩種情況：獨立 label、合併字串 "業務：許雲雀"）
     _person_skip: set[str] = set()
     for _pi, _pv in enumerate(values):
-        if _pv in _STAFF_LABELS and _pi + 1 < len(values):
+        # 情況1："業務：" 獨立 value，下一個 value 是姓名
+        if _pv in set(_SIGNING_PREFIXES) and _pi + 1 < len(values):
             _nx = values[_pi + 1]
             if _is_chinese(_nx) and len(_nx) <= 4:
                 _person_skip.add(_nx)
+        # 情況2："業務：許雲雀" 合併成單一 value
+        for _pfx in _SIGNING_PREFIXES:
+            if _pv.startswith(_pfx) and len(_pv) > len(_pfx):
+                _name = _pv[len(_pfx):].strip()
+                if _is_chinese(_name) and 1 <= len(_name) <= 4:
+                    _person_skip.add(_name)
+                break
 
     item_vals = [v for v in values[header_end:]
                  if not _is_header_noise(v) and v not in _person_skip]
@@ -330,7 +340,8 @@ def _parse_format_a(vals, ship_date, customer):
         for v in seg:
             if _is_page_fraction(v) or _is_seq(v):
                 continue
-            if v in _FOOTER_STOP:
+            # 頁尾標記或簽收區（業務：/審核：等）→ 停止收集品項資料
+            if v in _FOOTER_STOP or any(v.startswith(p) for p in _SIGNING_PREFIXES):
                 break
 
             if state == "spec":
@@ -400,7 +411,7 @@ def _parse_format_b(vals, ship_date, customer):
             abs_idx = seq_pos + 1 + j
             if _is_page_fraction(v) or _is_seq(v):
                 continue
-            if v in _FOOTER_STOP:
+            if v in _FOOTER_STOP or any(v.startswith(p) for p in _SIGNING_PREFIXES):
                 break
             if _is_chinese(v):
                 if len(v) >= 2 and not item["name"] and v not in _FOOTER_STOP:
