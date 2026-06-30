@@ -117,22 +117,15 @@ def _is_login_page(page) -> bool:
     return page.locator("input[type='password']").count() > 0
 
 
-def _go_to_ship_orders(page, dbg, username: str = "", password: str = ""):
-    """回主頁，找到「出貨單」按鈕後點擊，等待出貨單列表出現。"""
-    page.goto(ERP_INDEX, timeout=30_000)
-    page.wait_for_load_state("domcontentloaded")
-
-    # session 失效 → 重新登入
-    if _is_login_page(page):
-        dbg("relogin_needed")
-        _login(page, username, password, dbg)
-        page.wait_for_load_state("networkidle", timeout=20_000)
-
-    dbg("03a_dashboard")
-
-    # 掃所有 frame，找「出貨單」元素並點擊（支援 a / button / td / span）
-    clicked = False
+def _click_nav_ship_orders(page) -> bool:
+    """在所有 frame 裡找「出貨單」導覽元素並點擊，成功回傳 True。"""
     for frame in page.frames:
+        # 跳過 about:blank（Google Translate 等注入 iframe，不可能有導覽列）
+        try:
+            if frame.url in ("about:blank", ""):
+                continue
+        except Exception:
+            continue
         try:
             loc = frame.locator(
                 "a:has-text('出貨單'), button:has-text('出貨單'), "
@@ -140,92 +133,84 @@ def _go_to_ship_orders(page, dbg, username: str = "", password: str = ""):
             )
             if loc.count() > 0:
                 loc.first.click(timeout=3_000)
-                clicked = True
-                break
+                return True
         except Exception:
             pass
+    return False
 
-    if not clicked:
-        raise RuntimeError("在所有 frame 中找不到「出貨單」按鈕")
 
-    # 等頁面穩定
-    try:
+def _go_to_ship_orders(page, dbg, username: str = "", password: str = ""):
+    """確保 session 有效後點「出貨單」，不等 table（由 _download_one 輪詢）。"""
+    # ── session 失效偵測 ──
+    if _is_login_page(page):
+        dbg("relogin_needed")
+        _login(page, username, password, dbg)
         page.wait_for_load_state("networkidle", timeout=20_000)
-    except Exception:
-        pass
 
-    # 等 table 出現（先等主 frame，再試各子 frame）
-    found_table = False
-    try:
-        page.wait_for_selector("table", timeout=8_000)
-        found_table = True
-    except Exception:
-        pass
-    if not found_table:
-        for frame in page.frames[1:]:
-            try:
-                frame.wait_for_selector("table", timeout=4_000)
-                found_table = True
-                break
-            except Exception:
-                pass
+    dbg("03a_dashboard")
 
-    dbg("03_order_list")
+    # ── 點「出貨單」──
+    if not _click_nav_ship_orders(page):
+        # 若目前頁面沒有導覽列（如 PDF 下載結果頁），先回首頁
+        page.goto(ERP_INDEX, timeout=30_000)
+        page.wait_for_load_state("networkidle", timeout=15_000)
+        if _is_login_page(page):
+            _login(page, username, password, dbg)
+            page.wait_for_load_state("networkidle", timeout=20_000)
+        if not _click_nav_ship_orders(page):
+            raise RuntimeError("在所有 frame 中找不到「出貨單」按鈕")
+
+    dbg("03_clicked_ship_orders")
 
 
-def _active_frame(page, order_no: str = ""):
+def _find_order_row(page, order_no: str):
     """
-    ERP 頁面常用 iframe 架構：主頁是外框，內容在子 frame。
-    先找含出貨單號的 frame；若找不到則找最大的非主 frame；最後 fallback 主 page。
+    在所有非 about:blank frame（含主 frame）裡找出貨單號對應的 <tr>。
+    回傳 (frame, row_locator) 或 (page, None)。
     """
-    frames = page.frames
-    if len(frames) <= 1:
-        return page  # 沒有 iframe，直接用 main frame
-
-    if order_no:
-        for f in frames[1:]:
-            try:
-                if f.locator(f"text={order_no}").count() > 0:
-                    return f
-            except Exception:
-                pass
-
-    # fallback：第一個非主 frame（通常是內容區）
-    return frames[1]
+    for f in page.frames:
+        try:
+            url = f.url or ""
+            if url == "about:blank":
+                continue
+            row = f.locator(f"tr:has-text('{order_no}')")
+            if row.count() > 0:
+                return f, row.first
+        except Exception:
+            pass
+    return page, None
 
 
 def _download_one(page, order_no: str, dbg) -> bytes:
-    # 等 table 出現（動態載入頁可能需要額外時間）
-    try:
-        page.wait_for_selector("table tr, iframe", timeout=15_000)
-    except Exception:
-        pass
+    import time
 
-    frame = _active_frame(page, order_no)
+    # ── 輪詢等待出貨單號出現（最多 25 秒）──
+    row = None
+    deadline = time.time() + 25
+    while time.time() < deadline:
+        _, row = _find_order_row(page, order_no)
+        if row is not None:
+            break
+        page.wait_for_timeout(500)
 
-    # 在正確 frame 裡找出貨單列
-    row = frame.locator(f"tr:has-text('{order_no}')").first
-    if row.count() == 0:
-        # 嘗試搜尋欄位
-        for s_sel in [
-            f"input[type='text'][id*='search' i]:visible",
-            "input[type='text']:visible",
-        ]:
-            search_inputs = frame.locator(s_sel)
-            if search_inputs.count() > 0:
-                search_inputs.first.fill(order_no)
-                search_inputs.first.press("Enter")
-                page.wait_for_load_state("networkidle", timeout=15_000)
-                frame = _active_frame(page, order_no)
-                row = frame.locator(f"tr:has-text('{order_no}')").first
-                if row.count() > 0:
+    # ── 若輪詢後仍找不到，嘗試搜尋欄位 ──
+    if row is None:
+        for f in page.frames:
+            try:
+                si = f.locator("input[type='text']:visible")
+                if si.count() > 0:
+                    si.first.fill(order_no)
+                    si.first.press("Enter")
+                    page.wait_for_load_state("networkidle", timeout=10_000)
+                    _, row = _find_order_row(page, order_no)
                     break
+            except Exception:
+                pass
 
-    if row.count() == 0:
+    if row is None:
         url = page.url
         title = page.title()
         frames_info = " | ".join(f.url for f in page.frames)
-        # 嘗試從所有 frame 取得頁面文字以輔助除錯
         preview = ""
         for f in page.frames:
             try:
@@ -241,23 +226,34 @@ def _download_one(page, order_no: str, dbg) -> bytes:
             f"頁面內容預覽：{preview[:500]}"
         )
 
-    # 點「標籤」按鈕
+    # ── 點「標籤」按鈕 ──
     row.locator("text=標籤").first.click()
     page.wait_for_load_state("networkidle", timeout=20_000)
     dbg(f"04_label_{order_no}")
 
-    # 勾選全部 checkbox（如果有）——同樣在正確 frame 裡找
-    frame2 = _active_frame(page)
-    for cb in frame2.locator("input[type='checkbox']:visible").all():
+    # ── 勾選全部 checkbox ──
+    for f in page.frames:
         try:
-            if not cb.is_checked():
-                cb.check()
+            if (f.url or "") == "about:blank":
+                continue
+            for cb in f.locator("input[type='checkbox']:visible").all():
+                if not cb.is_checked():
+                    cb.check()
         except Exception:
             pass
 
-    # 點「下載選取標籤」
+    # ── 點「下載選取標籤」並接收下載 ──
     with page.expect_download(timeout=30_000) as dl_info:
-        frame2.locator("text=下載選取標籤").click()
+        for f in page.frames:
+            try:
+                if (f.url or "") == "about:blank":
+                    continue
+                btn = f.locator("text=下載選取標籤")
+                if btn.count() > 0:
+                    btn.first.click()
+                    break
+            except Exception:
+                pass
 
     dl = dl_info.value
     pdf_bytes = Path(dl.path()).read_bytes()
