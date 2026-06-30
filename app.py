@@ -225,12 +225,11 @@ with tab_label:
                             ]
                             if missing:
                                 st.info(
-                                    "以下銷貨單的模板尚未上傳原始 Excel（無樣式）：
-"
-                                    + "\n".join(missing)
-                                    + "
+                                    f"""以下銷貨單的模板尚未上傳原始 Excel（無樣式）：
 
-請到「管理模板」重新上傳對應模板 Excel。"
+                                {chr(10).join(missing)}
+
+                                請到「管理模板」重新上傳對應模板 Excel。"""
                                 )
                         except Exception as e:
                             st.error(f"產出失敗：{e}")
