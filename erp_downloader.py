@@ -118,26 +118,58 @@ def _is_login_page(page) -> bool:
 
 
 def _go_to_ship_orders(page, dbg, username: str = "", password: str = ""):
-    # 直接 goto 出貨單列表（繞過 JavaScript 導覽；MA10.aspx 由錯誤訊息 URL 確認）
-    page.goto(ERP_ORDERS, timeout=30_000)
+    """回主頁，找到「出貨單」按鈕後點擊，等待出貨單列表出現。"""
+    page.goto(ERP_INDEX, timeout=30_000)
     page.wait_for_load_state("domcontentloaded")
 
-    # 若被踢到登入頁（session 失效），重新登入後再 goto
+    # session 失效 → 重新登入
     if _is_login_page(page):
         dbg("relogin_needed")
-        if username and password:
-            _login(page, username, password, dbg)
-        else:
-            raise RuntimeError("ERP session 已過期，無法自動重新登入（缺少帳密）")
-        page.goto(ERP_ORDERS, timeout=30_000)
+        _login(page, username, password, dbg)
+        page.wait_for_load_state("networkidle", timeout=20_000)
 
-    page.wait_for_load_state("networkidle", timeout=20_000)
+    dbg("03a_dashboard")
 
-    # 等 table 出現（動態載入頁可能需要額外時間）
+    # 掃所有 frame，找「出貨單」元素並點擊（支援 a / button / td / span）
+    clicked = False
+    for frame in page.frames:
+        try:
+            loc = frame.locator(
+                "a:has-text('出貨單'), button:has-text('出貨單'), "
+                "td:has-text('出貨單'), span:has-text('出貨單'), li:has-text('出貨單')"
+            )
+            if loc.count() > 0:
+                loc.first.click(timeout=3_000)
+                clicked = True
+                break
+        except Exception:
+            pass
+
+    if not clicked:
+        raise RuntimeError("在所有 frame 中找不到「出貨單」按鈕")
+
+    # 等頁面穩定
     try:
-        page.wait_for_selector("table", timeout=10_000)
+        page.wait_for_load_state("networkidle", timeout=20_000)
     except Exception:
         pass
+
+    # 等 table 出現（先等主 frame，再試各子 frame）
+    found_table = False
+    try:
+        page.wait_for_selector("table", timeout=8_000)
+        found_table = True
+    except Exception:
+        pass
+    if not found_table:
+        for frame in page.frames[1:]:
+            try:
+                frame.wait_for_selector("table", timeout=4_000)
+                found_table = True
+                break
+            except Exception:
+                pass
+
     dbg("03_order_list")
 
 
