@@ -25,6 +25,7 @@ ALL_FIELDS = {
     "數量":     lambda item, order: str(item.get("quantity", "")),
     "單位":     lambda item, order: item.get("unit", "PC"),
     "客戶料號": lambda item, order: item.get("remark", ""),
+    "批號":     lambda item, order: item.get("lot_no", ""),
     "客戶名稱": lambda item, order: item.get("customer", ""),
     "出貨日期": lambda item, order: _fmt_date(item.get("ship_date", "")),
     "銷貨單號": lambda item, order: order.get("order_no", ""),
@@ -34,7 +35,7 @@ ALL_FIELDS = {
     "聯絡人":   lambda item, order: order.get("contact", ""),
 }
 
-DEFAULT_FIELDS = ["料號", "品名", "數量", "客戶料號", "客戶名稱", "出貨日期", "銷貨單號"]
+DEFAULT_FIELDS = ["料號", "品名", "數量", "客戶料號", "批號", "客戶名稱", "出貨日期", "銷貨單號"]
 
 
 def _fmt_date(d: str) -> str:

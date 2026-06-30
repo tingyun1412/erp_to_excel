@@ -239,10 +239,14 @@ def _parse_format_a(vals, ship_date, customer):
                     state = "got_item_no"
 
             elif state == "got_item_no":
-                if _is_lot_no(v):
+                if _is_lot_no(v) and re.match(r'^\d{12}$', v) and not item["lot_no"]:
                     item["lot_no"] = v
+                elif re.match(r'^[RP]\d{9,}$', v) and not item["remark"]:
+                    item["remark"] = v  # P/R+數字優先視為客戶料號
                 elif _is_part_no(v) and not item["remark"]:
                     item["remark"] = v  # 客戶料號
+                elif _is_lot_no(v) and not item["lot_no"]:
+                    item["lot_no"] = v
 
         item["description"] = " ".join(desc_parts).strip()
         items.append(item)
