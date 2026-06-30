@@ -156,6 +156,7 @@ with tab_label:
                             "品名":     item.get("description",""),
                             "數量":     item.get("quantity",""),
                             "客戶料號": item.get("remark",""),
+                            "批號":     item.get("lot_no",""),
                         } for item, order in selected_items],
                         use_container_width=True,
                         hide_index=True,

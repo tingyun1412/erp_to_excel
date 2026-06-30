@@ -23,10 +23,11 @@ DYNAMIC_FIELDS = {
     "數量":       "quantity",
     "出貨日期":   "ship_date",
     "客戶料號":   "remark",
+    "批號":       "lot_no",
     "銷貨單號":   "order_no",
     "客戶訂單":   "customer_order_no",
     "Lot No":    "lot_no",
-    "流水號":     "lot_no",
+    "流水號":     "sequence",
     "固定文字":   "__fixed__",
 }
 
@@ -51,7 +52,8 @@ def _get_value(item: dict, order: dict, field: str, seq: int = 1) -> str:
     if field in ("__fixed__", "", None):
         return None
     if field == "lot_no":
-        return _fmt_lot_no(order.get("order_no", ""), seq)
+        lot = item.get("lot_no", "")
+        return lot if lot else _fmt_lot_no(order.get("order_no", ""), seq)
     if field == "sequence":
         return f"{seq:04d}"
     if field == "ship_date":
@@ -91,7 +93,9 @@ def _guess_field(value: str) -> str:
         ("品名", "description_inline"), ("規格", "description_inline"),
         ("數量", "quantity_inline"),
         ("出貨日期", "ship_date_inline"), ("出廠日期", "ship_date_inline"),
-        ("lot no", "lot_no_inline"),
+        ("批號", "lot_no_inline"),
+        ("lot no", "lot_no_inline"), ("lot　no", "lot_no_inline"),
+        ("客戶料號", "remark_inline"),
     ]:
         if zh in v:
             return key
@@ -117,7 +121,9 @@ def _guess_field_from_label(label: str) -> str:
         "品名": "description_inline", "規格": "description_inline",
         "數量": "quantity_inline",
         "出貨日期": "ship_date_inline", "出廠日期": "ship_date_inline",
+        "批號": "lot_no_inline",
         "lot no": "lot_no_inline", "lot　no": "lot_no_inline",
+        "客戶料號": "remark_inline",
     }
     l = label.lower().rstrip("：:")
     for key, val in mapping.items():
@@ -233,7 +239,12 @@ def analyze_template(wb: openpyxl.Workbook, sheet_name: str) -> dict:
             display_val = formula_label  # 只存標籤前綴
         else:
             field = _guess_field(val)
-            display_val = val
+            if field.endswith("_inline"):
+                # 只存前綴（"料號："），丟掉範本的樣品值（"BLSS400170122SA"）
+                m = re.match(r'^(.*?[：:]\s*)', val)
+                display_val = m.group(1) if m else val
+            else:
+                display_val = val
 
         cells_info.append({
             "row":       rel_row,
@@ -327,11 +338,11 @@ def _fill_value(cell_info: dict, item: dict, order: dict, seq: int) -> str | Non
     if field.endswith("_inline"):
         # 格式：「標籤：值」合在一格
         new_val = _get_value(item, order, base_field, seq)
-        # 補回冒號（原始 label 已含冒號）
-        sep = "：" if "：" in label else ":" if ":" in label else "："
-        if not label.endswith(sep):
-            label = label + sep
-        return label + (new_val or "")
+        # 從 label 中只取前綴（到第一個 ：或 : 為止），
+        # 這樣即使 label 是「料號：BLSS400170122SA」也不會重複帶入範本值
+        m = re.match(r'^(.*?[：:]\s*)', label)
+        prefix = m.group(1) if m else (label.rstrip("：: ") + "：")
+        return prefix + (new_val or "")
     else:
         return _get_value(item, order, field, seq)
 
