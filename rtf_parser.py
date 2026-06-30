@@ -14,6 +14,36 @@ from pathlib import Path
 
 _FOOTER_STOP = {"以下空白"}
 
+# 換頁時會重複印出的表頭/簽收區標籤，解析品名/規格時應跳過（不可當作品名）
+_HEADER_NOISE_LABELS = {
+    "客戶代號", "客戶名稱", "聯", "絡", "人", "統一編號", "送貨地址",
+    "單據日期", "單據號碼", "訂單單號", "發票號碼", "送貨電話",
+    "傳\u3000\u3000真", "行動電話", "聯絡電話", "頁\u3000\u3000次",
+    "序號", "品名／規格", "單位", "數量", "銷貨單", "備註",
+    "GC", "單號", "客戶簽收：", "業務：", "審核：", "經辦人：",
+}
+
+
+def _is_header_noise(v: str) -> bool:
+    """判斷是否為換頁重印的表頭/簽收區文字（不應視為品名或規格）"""
+    if v in _HEADER_NOISE_LABELS:
+        return True
+    if "公司" in v:
+        return True  # 供應商/客戶公司全名重印
+    if any(kw in v for kw in ("市", "區", "縣", "路", "街")):
+        return True  # 送貨地址重印
+    if v in {"號", "樓", "路", "街", "巷", "弄", "段", "市", "區", "縣"}:
+        return True  # 地址片段重印
+    if re.match(r'^\d{1,3}$', v):
+        return True  # 地址門牌號等短數字片段
+    if _is_date(v) or _is_phone(v) or _is_page_fraction(v) or _is_tax_id(v):
+        return True
+    if re.match(r'^#\d+$', v):
+        return True
+    if re.match(r'^C\d{4}(-\d+)?$', v):
+        return True
+    return False
+
 
 def extract_field_values(rtf_bytes: bytes) -> list[str]:
     """
@@ -49,39 +79,29 @@ def extract_field_values(rtf_bytes: bytes) -> list[str]:
     return values
 
 
-def _extract_customer_name(rtf_bytes: bytes) -> str:
-    """從 RTF 中提取客戶公司名稱（客戶代號 Cxxxx 之後第一個含「公司」的中文串）"""
-    text = rtf_bytes.decode("cp950", errors="replace")
-    matches = []
-
-    for m in re.finditer(r"\\loch\\f18 ([^\r\n\\}]+)", text):
-        v = m.group(1).strip()
-        if v:
-            matches.append((m.start(), "loch", v))
-
-    _p_dbch = re.compile(r"\\hich\\af1\\dbch\\f18 ((?:\\'[0-9a-fA-F]{2}[\r\n\s]*)+)")
-    for m in _p_dbch.finditer(text):
-        hex_part = m.group(1)
-        try:
-            hbytes = bytes(int(x, 16) for x in re.findall(r"'([0-9a-fA-F]{2})", hex_part))
-            decoded = hbytes.decode("cp950", errors="replace").strip()
-            if decoded:
-                matches.append((m.start(), "dbch", decoded))
-        except Exception:
-            pass
-
-    matches.sort(key=lambda x: x[0])
-
-    customer_code_pos = next(
-        (pos for pos, kind, val in matches if kind == "loch" and re.match(r"^C\d{4}", val)),
+def _extract_customer_name_from_values(values: list[str]) -> str:
+    """
+    從欄位值序列中提取客戶公司名稱。
+    公司名稱在原始文件中常被拆成多個片段（例如「鼎元光電科技」「(」「股」「)」「公司竹南分公司」），
+    所以從客戶代號之後開始，把連續片段接起來，直到累積字串第一次出現「公司」為止才停止
+    （避免把後面重複列印的第二份名稱也接進來）。
+    """
+    code_idx = next(
+        (i for i, v in enumerate(values) if re.match(r"^C\d{4}(-\d+)?$", v)),
         None,
     )
-    if customer_code_pos is None:
+    if code_idx is None:
         return ""
-    for pos, kind, val in matches:
-        if pos > customer_code_pos and kind == "dbch" and len(val) > 3 and "公司" in val:
-            return val
-    return ""
+    parts = []
+    for v in values[code_idx + 1: code_idx + 1 + 10]:
+        if v in ("客戶名稱", "客戶代號"):
+            continue
+        if not v or _is_date(v) or _is_phone(v) or re.match(r"^#\d+$", v):
+            break
+        parts.append(v)
+        if "公司" in "".join(parts):
+            break
+    return "".join(parts)
 
 
 # ── 型別判斷 ──────────────────────────────────────────────────────
@@ -181,8 +201,6 @@ def parse_sales_order_rtf(file_path) -> dict:
         if re.match(r'^C\d{4}(-\d+)?$', v):
             result["customer_code"] = v
             customer_code_found = True
-        elif customer_code_found and _is_chinese(v) and len(v) > 3 and "公司" in v and not result["customer_name"]:
-            result["customer_name"] = v
         elif re.match(r'^#\d+$', v):
             result["contact"] = v
         elif _is_date(v):
@@ -199,8 +217,7 @@ def parse_sales_order_rtf(file_path) -> dict:
             if v not in phones:
                 phones.append(v)
 
-    if not result["customer_name"]:
-        result["customer_name"] = _extract_customer_name(raw)
+    result["customer_name"] = _extract_customer_name_from_values(values[:header_end])
 
     for tid in tax_ids:
         if re.match(r'^\d{8}$', tid) and not result["seller_tax_id"]:
@@ -217,9 +234,7 @@ def parse_sales_order_rtf(file_path) -> dict:
     if not result["order_date"] and result["order_no"]:
         result["order_date"] = result["order_no"][:8]
 
-    header_known = set(values[:header_end])
-    item_vals = [v for v in values[header_end:]
-                 if v not in header_known or _is_seq(v) or _is_qty(v)]
+    item_vals = [v for v in values[header_end:] if not _is_header_noise(v)]
 
     first_seq_pos = next((i for i, v in enumerate(item_vals) if _is_seq(v)), None)
     format_b = (
@@ -228,8 +243,17 @@ def parse_sales_order_rtf(file_path) -> dict:
         and any(_is_spec(v) for v in item_vals[:first_seq_pos])
     )
 
+    # 格式C：項次 → 數量 → 單位 → 料號 → 客戶料號 → 品名 → 規格
+    # 判斷依據：項次後緊接著就是數量（格式A/B皆非如此）
+    format_c = False
+    if not format_b and first_seq_pos is not None:
+        nxt = item_vals[first_seq_pos + 1] if first_seq_pos + 1 < len(item_vals) else ""
+        format_c = _is_qty(nxt)
+
     if format_b:
         result["items"] = _parse_format_b(item_vals, result["order_date"], customer_from_filename)
+    elif format_c:
+        result["items"] = _parse_format_c(item_vals, result["order_date"], customer_from_filename)
     else:
         result["items"] = _parse_format_a(item_vals, result["order_date"], customer_from_filename)
 
@@ -389,6 +413,76 @@ def _parse_format_b(vals, ship_date, customer):
 
         _classify_post_item(item, post_vals)
         consumed_up_to = last_consumed
+        items.append(item)
+
+    return items
+
+
+def _parse_format_c(vals, ship_date, customer):
+    """格式C：項次 → 數量 → 單位 → 料號 → 客戶料號 → 品名 → 規格（可能因換頁而重複印一次）"""
+    seq_positions = [i for i, v in enumerate(vals) if _is_seq(v)]
+    items = []
+
+    for si, seq_pos in enumerate(seq_positions):
+        end = seq_positions[si + 1] if si + 1 < len(seq_positions) else len(vals)
+        seg = vals[seq_pos + 1 : end]
+
+        item = _blank_item(vals[seq_pos], ship_date, customer)
+        desc_parts, desc_seen, post_vals = [], set(), []
+        state = "qty"
+
+        for v in seg:
+            if _is_page_fraction(v) or _is_seq(v):
+                continue
+            if v in _FOOTER_STOP:
+                break
+            if _is_header_noise(v):
+                continue  # 換頁重印的表頭/簽收區文字，跳過但繼續找真正的品名
+
+            if state == "qty":
+                if _is_qty(v):
+                    item["quantity"] = _clean_qty(v)
+                    state = "unit"
+
+            elif state == "unit":
+                if _is_chinese(v) and len(v) <= 2:
+                    item["unit"] = v
+                    state = "item_no"
+                elif _is_part_no(v):
+                    item["item_no"] = v
+                    state = "post_item"
+
+            elif state == "item_no":
+                if _is_part_no(v):
+                    item["item_no"] = v
+                    state = "post_item"
+
+            elif state == "post_item":
+                if _is_chinese(v):
+                    if not item["name"]:
+                        item["name"] = v
+                        state = "spec"
+                elif _is_part_no(v) and not item["remark"]:
+                    item["remark"] = v
+                else:
+                    post_vals.append(v)
+
+            elif state == "spec":
+                if _is_chinese(v):
+                    if v == item["name"]:
+                        break  # 偵測到重複印的第二份，停止避免重複累加
+                    elif len(v) <= 2 and v not in desc_seen:
+                        desc_parts.append(v)
+                        desc_seen.add(v)
+                elif _is_spec(v):
+                    if v not in desc_seen:
+                        desc_parts.append(v)
+                        desc_seen.add(v)
+                elif _is_part_no(v):
+                    post_vals.append(v)
+
+        _classify_post_item(item, post_vals)
+        item["description"] = " ".join(desc_parts).strip()
         items.append(item)
 
     return items

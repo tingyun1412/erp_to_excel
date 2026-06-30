@@ -403,8 +403,6 @@ def _write_order_to_sheet(
         else:
             rows_needed = (qty + units_per_row - 1) // units_per_row
             for label_row in range(rows_needed):
-                if ws_tmpl:
-                    _copy_sheet_images(ws_tmpl, ws_out, row_offset=current_row - 1)
                 for rel_row_str, height in row_heights.items():
                     abs_row = current_row + int(rel_row_str) - 1
                     ws_out.row_dimensions[abs_row].height = height
@@ -445,6 +443,8 @@ def generate_from_template(
         for ch in r':\/? *[]':
             ws_name = ws_name.replace(ch, "_")
         ws_out = wb_out.create_sheet(title=ws_name)
+        if ws_tmpl:
+            _copy_sheet_images(ws_tmpl, ws_out, row_offset=0)
         _write_order_to_sheet(ws_out, ws_tmpl, template_info, [order])
 
     if not wb_out.sheetnames:
@@ -486,6 +486,8 @@ def generate_labels_multiorder(
         for ch in r':\/? *[]':
             ws_name = ws_name.replace(ch, "_")
         ws_out = wb_out.create_sheet(title=ws_name)
+        if ws_tmpl:
+            _copy_sheet_images(ws_tmpl, ws_out, row_offset=0)
         _write_order_to_sheet(ws_out, ws_tmpl, tinfo, [order])
 
     if not wb_out.sheetnames:

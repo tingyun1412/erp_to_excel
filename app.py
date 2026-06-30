@@ -5,6 +5,7 @@
   B - 標籤模板管理（上傳舊標籤 → 設定欄位 → 產出新標籤）
 """
 import json
+import re
 import tempfile
 from io import BytesIO
 
@@ -253,13 +254,13 @@ with tab_label:
     # ── 管理模板 ──────────────────────────────────────────────
     with sub_tab_manage:
         st.markdown("### 上傳新模板")
-        st.caption("上傳舊的標籤 Excel，系統自動分析格式，讓你確認欄位對應後存檔")
+        st.caption("上傳舊的標籤 Excel，系統自動分析格式，讓你確認欄位對應後存檔；廠商名稱／模板名稱留空時，直接使用工作表名稱命名")
 
         col1, col2 = st.columns(2)
         with col1:
-            new_customer = st.text_input("廠商名稱", placeholder="例：晶晟")
+            new_customer = st.text_input("廠商名稱（留空則用工作表名稱）", placeholder="例：晶晟")
         with col2:
-            new_tmpl_name = st.text_input("模板名稱", placeholder="例：標準出貨標籤")
+            new_tmpl_name = st.text_input("模板名稱（留空則用工作表名稱）", placeholder="例：標準出貨標籤")
 
         uploaded_tmpl = st.file_uploader(
             "上傳標籤 Excel 範本",
@@ -267,7 +268,7 @@ with tab_label:
             key="new_template_upload",
         )
 
-        if uploaded_tmpl and new_customer:
+        if uploaded_tmpl:
             tmpl_bytes = uploaded_tmpl.read()
             wb = openpyxl.load_workbook(BytesIO(tmpl_bytes))
             sheet_names = wb.sheetnames
@@ -287,8 +288,10 @@ with tab_label:
                         saved, skipped = 0, 0
                         for sname, info in results.items():
                             try:
-                                save_template(new_customer, sname, template_to_json(info))
-                                tmpl_key = f"{new_customer}_{sname}"
+                                vendor = new_customer.strip() or sname
+                                tname = new_tmpl_name.strip() or sname
+                                save_template(vendor, tname, template_to_json(info))
+                                tmpl_key = f"{vendor}_{tname}"
                                 st.session_state.template_wb_bytes[tmpl_key] = tmpl_bytes
                                 saved += 1
                             except Exception:
@@ -298,9 +301,7 @@ with tab_label:
                         st.rerun()
             else:
                 selected_sheet = st.selectbox("選擇要分析的工作表", sheet_names)
-                if not new_tmpl_name:
-                    st.info("請填寫模板名稱")
-                elif st.button("分析模板", type="primary"):
+                if st.button("分析模板", type="primary"):
                     with st.spinner("分析中..."):
                         template_info = analyze_template(wb, selected_sheet)
                     if not template_info:
@@ -312,8 +313,8 @@ with tab_label:
                         )
                         st.session_state["_pending_template"] = template_info
                         st.session_state["_pending_tmpl_bytes"] = tmpl_bytes
-                        st.session_state["_pending_customer"] = new_customer
-                        st.session_state["_pending_tmpl_name"] = new_tmpl_name
+                        st.session_state["_pending_customer"] = new_customer.strip() or selected_sheet
+                        st.session_state["_pending_tmpl_name"] = new_tmpl_name.strip() or selected_sheet
 
         # 欄位對應確認
         if "_pending_template" in st.session_state:
@@ -402,72 +403,91 @@ with tab_label:
         except Exception as e:
             st.error(f"載入失敗：{e}")
 
-    # ── ERP 下載 PDF ─────────────────────────────────────────────
+    # ── 廠商網站下載標籤 ─────────────────────────────────────────
     with sub_tab_erp:
+        st.caption("直接從廠商網站下載標籤 PDF（需要電腦可連到 ERP 網路），可從已解析的銷貨單勾選，或直接輸入銷貨單號")
+
         all_orders = st.session_state.parsed_orders
+        order_nos_from_parsed = [o.get("order_no", "") for o in all_orders if o.get("order_no")]
 
-        if not all_orders:
-            st.info("請先在左側上傳並解析銷貨單")
+        input_mode = st.radio(
+            "選擇出貨單方式",
+            ["從已解析銷貨單勾選", "直接輸入銷貨單號"],
+            horizontal=True,
+        )
+
+        selected_nos = []
+        if input_mode == "從已解析銷貨單勾選":
+            if not order_nos_from_parsed:
+                st.info("尚無已解析的銷貨單，請先在左側上傳，或改用「直接輸入銷貨單號」")
+            else:
+                selected_nos = st.multiselect(
+                    "選擇要下載的出貨單",
+                    options=order_nos_from_parsed,
+                    default=order_nos_from_parsed,
+                )
         else:
-            st.caption("直接從 ERP 系統下載標籤 PDF（需要電腦可連到 ERP 網路）")
-
-            order_nos = [o.get("order_no", "") for o in all_orders if o.get("order_no")]
-            selected_nos = st.multiselect(
-                "選擇要下載的出貨單",
-                options=order_nos,
-                default=order_nos,
+            raw_text = st.text_area(
+                "輸入銷貨單號（可多筆，用換行或逗號分隔）",
+                placeholder="202606100012\n202606020007",
+                height=120,
             )
+            selected_nos = [
+                n.strip() for n in re.split(r"[,\n，、]+", raw_text) if n.strip()
+            ]
+            if selected_nos:
+                st.caption(f"共 {len(selected_nos)} 筆：{', '.join(selected_nos)}")
 
-            col1, col2 = st.columns(2)
-            with col1:
-                erp_user = st.text_input("ERP 帳號", value="BR026", key="erp_user")
-            with col2:
-                erp_pass = st.text_input("ERP 密碼", value="5403", type="password", key="erp_pass")
+        col1, col2 = st.columns(2)
+        with col1:
+            erp_user = st.text_input("ERP 帳號", value="BR026", key="erp_user")
+        with col2:
+            erp_pass = st.text_input("ERP 密碼", value="5403", type="password", key="erp_pass")
 
-            if selected_nos and st.button("從 ERP 下載標籤 PDF", type="primary", use_container_width=True):
-                with st.spinner("連線 ERP 並下載中，請稍候..."):
-                    try:
-                        from erp_downloader import download_label_pdfs, pack_zip
-                        results = download_label_pdfs(selected_nos, erp_user, erp_pass)
+        if selected_nos and st.button("從廠商網站下載標籤 PDF", type="primary", use_container_width=True):
+            with st.spinner("連線 ERP 並下載中，請稍候..."):
+                try:
+                    from erp_downloader import download_label_pdfs, pack_zip
+                    results = download_label_pdfs(selected_nos, erp_user, erp_pass)
 
-                        success = {no: data for no, data in results.items() if data}
-                        failed  = [no for no, data in results.items() if not data]
+                    success = {no: data for no, data in results.items() if data}
+                    failed  = [no for no, data in results.items() if not data]
 
-                        if success:
-                            if len(success) == 1:
-                                order_no, pdf_bytes = next(iter(success.items()))
-                                st.download_button(
-                                    f"⬇️ 下載 {order_no} 標籤.pdf",
-                                    data=pdf_bytes,
-                                    file_name=f"標籤_{order_no}.pdf",
-                                    mime="application/pdf",
-                                    use_container_width=True,
-                                )
-                            else:
-                                zip_bytes = pack_zip(success)
-                                st.download_button(
-                                    f"⬇️ 下載所有標籤 ({len(success)} 筆).zip",
-                                    data=zip_bytes,
-                                    file_name="ERP標籤.zip",
-                                    mime="application/zip",
-                                    use_container_width=True,
-                                )
+                    if success:
+                        if len(success) == 1:
+                            order_no, pdf_bytes = next(iter(success.items()))
+                            st.download_button(
+                                f"⬇️ 下載 {order_no} 標籤.pdf",
+                                data=pdf_bytes,
+                                file_name=f"標籤_{order_no}.pdf",
+                                mime="application/pdf",
+                                use_container_width=True,
+                            )
+                        else:
+                            zip_bytes = pack_zip(success)
+                            st.download_button(
+                                f"⬇️ 下載所有標籤 ({len(success)} 筆).zip",
+                                data=zip_bytes,
+                                file_name="ERP標籤.zip",
+                                mime="application/zip",
+                                use_container_width=True,
+                            )
 
-                        if failed:
-                            st.warning(f"以下出貨單下載失敗：{', '.join(failed)}")
-                        if not success and not failed:
-                            st.error("未取得任何 PDF，請確認 ERP 帳密與網路連線")
+                    if failed:
+                        st.warning(f"以下出貨單下載失敗：{', '.join(failed)}")
+                    if not success and not failed:
+                        st.error("未取得任何 PDF，請確認 ERP 帳密與網路連線")
 
-                    except ImportError:
-                        st.error(
-                            "請先安裝 Playwright：\n"
-                            "```\npip install playwright\n"
-                            "python -m playwright install chromium\n```"
-                        )
-                    except Exception as e:
-                        st.error(f"下載失敗：{e}")
-                        import traceback
-                        st.code(traceback.format_exc())
+                except ImportError:
+                    st.error(
+                        "請先安裝 Playwright：\n"
+                        "```\npip install playwright\n"
+                        "python -m playwright install chromium\n```"
+                    )
+                except Exception as e:
+                    st.error(f"下載失敗：{e}")
+                    import traceback
+                    st.code(traceback.format_exc())
 
 
 # ════════════════════════════════════════════════════════════════
