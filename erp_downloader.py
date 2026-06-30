@@ -10,7 +10,8 @@ import io
 import zipfile
 from pathlib import Path
 
-ERP_INDEX = "http://scm.honprec.com/hp/Index.aspx"
+ERP_INDEX  = "http://scm.honprec.com/hp/Index.aspx"
+ERP_ORDERS = "https://scm.honprec.com/HP/MA10.aspx"   # 出貨單列表（觀察自錯誤訊息 URL）
 
 
 def download_label_pdfs(
@@ -117,48 +118,22 @@ def _is_login_page(page) -> bool:
 
 
 def _go_to_ship_orders(page, dbg, username: str = "", password: str = ""):
-    import re as _re
-    page.goto(ERP_INDEX, timeout=30_000)
+    # 直接 goto 出貨單列表（繞過 JavaScript 導覽；MA10.aspx 由錯誤訊息 URL 確認）
+    page.goto(ERP_ORDERS, timeout=30_000)
     page.wait_for_load_state("domcontentloaded")
 
-    # PDF 下載後 ERP session 可能失效，自動重新登入
+    # 若被踢到登入頁（session 失效），重新登入後再 goto
     if _is_login_page(page):
         dbg("relogin_needed")
         if username and password:
             _login(page, username, password, dbg)
         else:
             raise RuntimeError("ERP session 已過期，無法自動重新登入（缺少帳密）")
-
-    # 取出「出貨單」連結的 href，直接 goto（比 click 可靠）
-    nav_url = None
-    try:
-        link = page.locator("a:has-text('出貨單')").first
-        href = link.get_attribute("href", timeout=3_000)
-        if href and not href.lower().startswith("javascript") and href != "#":
-            base = _re.match(r'https?://[^/]+', page.url).group()
-            if href.startswith("http"):
-                nav_url = href
-            elif href.startswith("/"):
-                nav_url = base + href
-            else:
-                # 相對路徑 e.g. "MA10.aspx"
-                folder = _re.match(r'(https?://[^/]+(?:/[^/]+/)?)', page.url).group(1)
-                nav_url = folder + href
-    except Exception:
-        pass
-
-    if nav_url:
-        page.goto(nav_url, timeout=30_000)
-    else:
-        # Fallback：直接 click
-        for sel in ["a:has-text('出貨單')", "button:has-text('出貨單')", "text=出貨單"]:
-            loc = page.locator(sel)
-            if loc.count() > 0:
-                loc.first.click()
-                break
+        page.goto(ERP_ORDERS, timeout=30_000)
 
     page.wait_for_load_state("networkidle", timeout=20_000)
-    # 等待 table 出現（動態載入）
+
+    # 等 table 出現（動態載入頁可能需要額外時間）
     try:
         page.wait_for_selector("table", timeout=10_000)
     except Exception:
