@@ -18,7 +18,7 @@ from openpyxl.utils import get_column_letter
 # ── 欄位對應表 ────────────────────────────────────────────────────
 DYNAMIC_FIELDS = {
     "料號":       "item_no",
-    "品名":       "description",
+    "品名":       "name",
     "規格":       "description",
     "數量":       "quantity",
     "出貨日期":   "ship_date",
@@ -35,12 +35,7 @@ FIELD_LABELS = list(DYNAMIC_FIELDS.keys())
 
 
 def _fmt_date(d: str) -> str:
-    if len(d) == 8:
-        try:
-            return f"{d[:4]}.{d[4:6]}.{d[6:8]}"
-        except Exception:
-            pass
-    return d
+    return d  # 直接回傳 YYYYMMDD，不加點
 
 
 def _fmt_lot_no(order_no: str, seq: int) -> str:
@@ -61,7 +56,7 @@ def _get_value(item: dict, order: dict, field: str, seq: int = 1) -> str:
     if field == "quantity":
         qty = item.get("quantity", "")
         unit = item.get("unit", "PCS")
-        return f"{qty} {unit}" if qty else ""
+        return f"{qty}{unit}" if qty else ""
     val = item.get(field) or order.get(field, "")
     return str(val) if val else ""
 
@@ -90,7 +85,8 @@ def _guess_field(value: str) -> str:
     # inline 格式（"料號：xxx"）
     for zh, key in [
         ("料號", "item_no_inline"), ("品號", "item_no_inline"),
-        ("品名", "description_inline"), ("規格", "description_inline"),
+        ("品名", "name_inline"),
+        ("規格", "description_inline"),
         ("數量", "quantity_inline"),
         ("出貨日期", "ship_date_inline"), ("出廠日期", "ship_date_inline"),
         ("批號", "lot_no_inline"),
@@ -118,7 +114,8 @@ def _guess_field_from_label(label: str) -> str:
     """從公式的前綴標籤（"料號："）猜欄位"""
     mapping = {
         "料號": "item_no_inline", "品號": "item_no_inline",
-        "品名": "description_inline", "規格": "description_inline",
+        "品名": "name_inline",
+        "規格": "description_inline",
         "數量": "quantity_inline",
         "出貨日期": "ship_date_inline", "出廠日期": "ship_date_inline",
         "批號": "lot_no_inline",
@@ -347,18 +344,13 @@ def _fill_value(cell_info: dict, item: dict, order: dict, seq: int) -> str | Non
         return _get_value(item, order, field, seq)
 
 
-def generate_from_template(
+def _write_order_to_sheet(
+    ws_out,
+    ws_tmpl,
     template_info: dict,
     orders: list[dict],
-    template_wb: openpyxl.Workbook,
-) -> BytesIO:
-    wb_out = openpyxl.Workbook()
-    ws_out = wb_out.active
-    ws_out.title = "出貨標籤"
-
-    sheet_name = template_info.get("sheet_name", "")
-    ws_tmpl = template_wb[sheet_name] if sheet_name in template_wb.sheetnames else None
-
+):
+    """Put all items from `orders` into `ws_out` using `template_info`."""
     unit_rows        = template_info["unit_rows"]
     header_rows      = template_info.get("header_rows", 0)
     is_row_repeat    = template_info.get("is_row_repeat_mode", False)
@@ -386,8 +378,6 @@ def generate_from_template(
         qty = max(int(item.get("quantity", 1) or 1), 1)
 
         if is_row_repeat:
-            # 橫向流水號模式
-            # 標題行（只在每個品項開頭寫一次）
             if header_cells:
                 for hc in header_cells:
                     cell = ws_out.cell(row=current_row, column=hc["col"], value=hc["value"])
@@ -396,12 +386,10 @@ def generate_from_template(
                     ws_out.row_dimensions[current_row].height = row_heights["1"]
                 current_row += 1
 
-            # 每列兩個流水號，共 qty 列
             for row_offset in range(qty):
                 seq_left  = row_offset * 2 + 1
                 seq_right = row_offset * 2 + 2
                 data_row  = current_row + row_offset
-
                 for dc in data_cells:
                     col = dc["col"]
                     seq = seq_left if col <= columns_per_unit // 2 + 1 else seq_right
@@ -413,11 +401,10 @@ def generate_from_template(
             current_row += qty + 1
 
         else:
-            # 垂直重複模式
             rows_needed = (qty + units_per_row - 1) // units_per_row
-
             for label_row in range(rows_needed):
-                # 設定行高
+                if ws_tmpl:
+                    _copy_sheet_images(ws_tmpl, ws_out, row_offset=current_row - 1)
                 for rel_row_str, height in row_heights.items():
                     abs_row = current_row + int(rel_row_str) - 1
                     ws_out.row_dimensions[abs_row].height = height
@@ -426,27 +413,133 @@ def generate_from_template(
                     label_seq = label_row * units_per_row + unit_idx + 1
                     if label_seq > qty:
                         break
-
                     base_col = unit_idx * (columns_per_unit + gap_cols)
-
                     for dc in data_cells:
                         abs_row = current_row + dc["row"] - 1
                         abs_col = base_col + dc["col"]
                         val = _fill_value(dc, item, order, label_seq)
                         out_cell = ws_out.cell(row=abs_row, column=abs_col, value=val)
                         if ws_tmpl:
-                            orig_col = dc["col"]
-                            # 公式模式：原始格在第一個並排單元的欄位
-                            _copy_style(ws_tmpl, dc["row"], orig_col, out_cell)
+                            _copy_style(ws_tmpl, dc["row"], dc["col"], out_cell)
 
                 current_row += unit_rows
 
             current_row += 1
 
+
+def generate_from_template(
+    template_info: dict,
+    orders: list[dict],
+    template_wb: openpyxl.Workbook,
+) -> BytesIO:
+    """產出標籤 Excel：每張銷貨單一個工作表。"""
+    wb_out = openpyxl.Workbook()
+    wb_out.remove(wb_out.active)  # 移除預設空白工作表
+
+    sheet_name = template_info.get("sheet_name", "")
+    ws_tmpl = template_wb[sheet_name] if sheet_name in template_wb.sheetnames else None
+
+    for order in orders:
+        ws_name = (order.get("order_no") or order.get("filename", "標籤"))[:31]
+        # Excel 工作表名稱不可含 : \ / ? * [ ]
+        for ch in r':\/? *[]':
+            ws_name = ws_name.replace(ch, "_")
+        ws_out = wb_out.create_sheet(title=ws_name)
+        _write_order_to_sheet(ws_out, ws_tmpl, template_info, [order])
+
+    if not wb_out.sheetnames:
+        wb_out.create_sheet("出貨標籤")
+
     buf = BytesIO()
     wb_out.save(buf)
     buf.seek(0)
     return buf
+
+
+def generate_labels_multiorder(
+    order_template_pairs: list[dict],
+) -> BytesIO:
+    """
+    每張銷貨單可指定不同模板，產出一個 Excel（每單一個工作表）。
+
+    order_template_pairs: [
+        {
+            "order": <order_dict>,
+            "template_info": <template_info_dict>,
+            "template_wb": <openpyxl.Workbook>,  # 可為 None
+        },
+        ...
+    ]
+    """
+    wb_out = openpyxl.Workbook()
+    wb_out.remove(wb_out.active)
+
+    for pair in order_template_pairs:
+        order = pair["order"]
+        tinfo = pair["template_info"]
+        twb   = pair.get("template_wb") or openpyxl.Workbook()
+
+        sname = tinfo.get("sheet_name", "")
+        ws_tmpl = twb[sname] if sname in twb.sheetnames else None
+
+        ws_name = (order.get("order_no") or order.get("filename", "標籤"))[:31]
+        for ch in r':\/? *[]':
+            ws_name = ws_name.replace(ch, "_")
+        ws_out = wb_out.create_sheet(title=ws_name)
+        _write_order_to_sheet(ws_out, ws_tmpl, tinfo, [order])
+
+    if not wb_out.sheetnames:
+        wb_out.create_sheet("出貨標籤")
+
+    buf = BytesIO()
+    wb_out.save(buf)
+    buf.seek(0)
+    return buf
+
+
+def _copy_sheet_images(ws_src, ws_dst, row_offset: int = 0):
+    """Copy images from ws_src to ws_dst, shifting down by row_offset rows (1-indexed)."""
+    import io as _io
+    from openpyxl.drawing.image import Image as XLImage
+
+    for img in getattr(ws_src, '_images', []):
+        try:
+            # Extract raw bytes — try _data() first (openpyxl internal), then ref
+            if hasattr(img, '_data') and callable(img._data):
+                raw = img._data()
+            elif hasattr(img, 'ref'):
+                ref = img.ref
+                if isinstance(ref, (bytes, bytearray)):
+                    raw = bytes(ref)
+                elif hasattr(ref, 'read'):
+                    ref.seek(0)
+                    raw = ref.read()
+                else:
+                    continue
+            else:
+                continue
+
+            new_img = XLImage(_io.BytesIO(raw))
+            if img.width:  new_img.width  = img.width
+            if img.height: new_img.height = img.height
+
+            anchor = img.anchor
+            if isinstance(anchor, str):
+                m = re.match(r'^([A-Za-z]+)(\d+)$', anchor.strip())
+                if m:
+                    new_img.anchor = f"{m.group(1)}{int(m.group(2)) + row_offset}"
+                else:
+                    new_img.anchor = anchor
+            elif hasattr(anchor, '_from'):
+                orig = anchor._from
+                col_letter = get_column_letter(orig.col + 1)
+                new_img.anchor = f"{col_letter}{orig.row + 1 + row_offset}"
+            else:
+                new_img.anchor = f"A{1 + row_offset}"
+
+            ws_dst.add_image(new_img)
+        except Exception:
+            pass
 
 
 def _copy_style(ws_tmpl, row: int, col: int, dst_cell):

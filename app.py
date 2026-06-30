@@ -14,7 +14,8 @@ import openpyxl
 from rtf_parser import parse_sales_order_rtf
 from module_b_invoice import generate_invoice_excel
 from template_engine import (
-    analyze_template, analyze_all_sheets, generate_from_template,
+    analyze_template, analyze_all_sheets,
+    generate_from_template, generate_labels_multiorder,
     template_to_json, template_from_json,
     get_field_options, FIELD_LABELS, DYNAMIC_FIELDS,
 )
@@ -90,7 +91,7 @@ tab_label, tab_invoice = st.tabs([
 with tab_label:
     st.subheader("出貨標籤")
 
-    sub_tab_use, sub_tab_manage = st.tabs(["產出標籤", "管理模板"])
+    sub_tab_use, sub_tab_manage, sub_tab_erp = st.tabs(["產出標籤", "管理模板", "ERP 下載 PDF"])
 
     # ── 產出標籤 ──────────────────────────────────────────────
     with sub_tab_use:
@@ -99,7 +100,6 @@ with tab_label:
         if not all_orders:
             st.info("請先在左側上傳並解析銷貨單")
         else:
-            # 載入所有模板
             try:
                 all_templates = load_templates()
             except Exception as e:
@@ -109,27 +109,19 @@ with tab_label:
             if not all_templates:
                 st.warning("尚無任何標籤模板，請先到「管理模板」上傳")
             else:
+                def _match_template(customer_name: str):
+                    """找廠商名稱與客戶名稱有包含關係的模板（第一個符合的）"""
+                    if not customer_name:
+                        return None
+                    for r in all_templates:
+                        vendor = r.get("廠商名稱", "")
+                        if vendor and (vendor in customer_name or customer_name in vendor):
+                            return r
+                    return None
+
                 col_left, col_right = st.columns([1, 1])
 
                 with col_left:
-                    # 選模板
-                    template_options = [
-                        f"{r['廠商名稱']} — {r['模板名稱']}"
-                        for r in all_templates
-                    ]
-                    selected_idx = st.selectbox(
-                        "選擇標籤模板",
-                        options=range(len(template_options)),
-                        format_func=lambda i: template_options[i],
-                    )
-                    selected_record = all_templates[selected_idx]
-                    template_info = template_from_json(selected_record["設定JSON"])
-                    st.caption(
-                        f"標籤單元 {template_info.get('unit_rows')} 行　"
-                        f"｜　每列 {template_info.get('units_per_row')} 個並排"
-                    )
-
-                with col_right:
                     # 選銷貨單
                     order_options = {
                         o.get("order_no", o.get("filename", f"單{i}")): o
@@ -142,6 +134,33 @@ with tab_label:
                     )
                     selected_orders = [order_options[k] for k in selected_order_nos]
 
+                with col_right:
+                    # 備用模板（自動比對失敗時使用）
+                    template_options = [
+                        f"{r['廠商名稱']} — {r['模板名稱']}"
+                        for r in all_templates
+                    ]
+                    fallback_idx = st.selectbox(
+                        "備用模板（無法自動比對時使用）",
+                        options=range(len(template_options)),
+                        format_func=lambda i: template_options[i],
+                    )
+                    fallback_record = all_templates[fallback_idx]
+
+                # 顯示每張銷貨單對應的模板
+                if selected_orders:
+                    st.markdown("**各銷貨單自動比對模板：**")
+                    order_tmpl_map = {}
+                    for o in selected_orders:
+                        cname = o.get("customer_name", "")
+                        matched = _match_template(cname)
+                        rec = matched or fallback_record
+                        order_tmpl_map[o.get("order_no", o.get("filename", ""))] = rec
+                        status = "✅ 自動比對" if matched else "⚠️ 使用備用"
+                        st.caption(
+                            f"{o.get('order_no','')} — 客戶：{cname or '未知'}　{status}：{rec['廠商名稱']} — {rec['模板名稱']}"
+                        )
+
                 # 顯示選取的品項
                 selected_items = [
                     (item, order)
@@ -153,7 +172,8 @@ with tab_label:
                         [{
                             "銷貨單號": order.get("order_no",""),
                             "料號":     item.get("item_no",""),
-                            "品名":     item.get("description",""),
+                            "品名":     item.get("name",""),
+                            "規格":     item.get("description",""),
                             "數量":     item.get("quantity",""),
                             "客戶料號": item.get("remark",""),
                             "批號":     item.get("lot_no",""),
@@ -161,43 +181,75 @@ with tab_label:
                         use_container_width=True,
                         hide_index=True,
                     )
-                    st.caption(f"共 {len(selected_items)} 個品項，依數量產生對應張數標籤")
+                    st.caption(f"共 {len(selected_items)} 個品項，每張銷貨單一個工作表")
                 else:
                     st.warning("請選擇至少一張銷貨單")
 
-                # 模板 workbook（用來複製樣式）
-                tmpl_key = f"{selected_record['廠商名稱']}_{selected_record['模板名稱']}"
-                if tmpl_key not in st.session_state.template_wb_bytes:
-                    st.warning("需要上傳原始模板 Excel 才能保留字型/框線樣式")
-                    re_upload = st.file_uploader(
-                        "重新上傳此廠商的模板 Excel",
-                        type=["xlsx", "xls"],
-                        key=f"reupload_{tmpl_key}",
-                    )
-                    if re_upload:
-                        st.session_state.template_wb_bytes[tmpl_key] = re_upload.read()
-                        st.rerun()
-
-                if selected_items and st.button("產出標籤 Excel", type="primary", use_container_width=True):
+                if selected_orders and st.button("產出標籤 Excel", type="primary", use_container_width=True):
                     with st.spinner("產出中..."):
                         try:
-                            wb_bytes = st.session_state.template_wb_bytes.get(tmpl_key)
-                            template_wb = (
-                                openpyxl.load_workbook(BytesIO(wb_bytes))
-                                if wb_bytes else openpyxl.Workbook()
-                            )
-                            buf = generate_from_template(template_info, selected_orders, template_wb)
+                            pairs = []
+                            for o in selected_orders:
+                                cname = o.get("customer_name", "")
+                                matched = _match_template(cname)
+                                rec = matched or fallback_record
+                                tmpl_key = f"{rec['廠商名稱']}_{rec['模板名稱']}"
+                                wb_bytes = st.session_state.template_wb_bytes.get(tmpl_key)
+                                twb = (
+                                    openpyxl.load_workbook(BytesIO(wb_bytes))
+                                    if wb_bytes else openpyxl.Workbook()
+                                )
+                                pairs.append({
+                                    "order": o,
+                                    "template_info": template_from_json(rec["設定JSON"]),
+                                    "template_wb": twb,
+                                })
+
+                            buf = generate_labels_multiorder(pairs)
                             st.download_button(
                                 "⬇️ 下載標籤.xlsx",
                                 data=buf,
-                                file_name=f"標籤_{selected_record['廠商名稱']}.xlsx",
+                                file_name="出貨標籤.xlsx",
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                 use_container_width=True,
                             )
+
+                            # 提示缺少模板 Excel（無樣式時）
+                            missing = [
+                                f"{o.get('order_no','')} → {(order_tmpl_map.get(o.get('order_no','')) or fallback_record)['廠商名稱']}"
+                                for o in selected_orders
+                                if not st.session_state.template_wb_bytes.get(
+                                    f"{(order_tmpl_map.get(o.get('order_no','')) or fallback_record)['廠商名稱']}"
+                                    f"_{(order_tmpl_map.get(o.get('order_no','')) or fallback_record)['模板名稱']}"
+                                )
+                            ]
+                            if missing:
+                                st.info(
+                                    "以下銷貨單的模板尚未上傳原始 Excel（無樣式）：
+"
+                                    + "\n".join(missing)
+                                    + "
+
+請到「管理模板」重新上傳對應模板 Excel。"
+                                )
                         except Exception as e:
                             st.error(f"產出失敗：{e}")
                             import traceback
                             st.code(traceback.format_exc())
+
+                # 若模板 Excel 尚未上傳，提供重新上傳入口
+                unique_recs = {f"{r['廠商名稱']}_{r['模板名稱']}": r for r in order_tmpl_map.values()}.values() if selected_orders else []
+                for rec in unique_recs:
+                    tmpl_key = f"{rec['廠商名稱']}_{rec['模板名稱']}"
+                    if tmpl_key not in st.session_state.template_wb_bytes:
+                        re_upload = st.file_uploader(
+                            f"上傳「{rec['廠商名稱']} — {rec['模板名稱']}」原始 Excel（保留樣式用）",
+                            type=["xlsx", "xls"],
+                            key=f"reupload_{tmpl_key}",
+                        )
+                        if re_upload:
+                            st.session_state.template_wb_bytes[tmpl_key] = re_upload.read()
+                            st.rerun()
 
     # ── 管理模板 ──────────────────────────────────────────────
     with sub_tab_manage:
@@ -350,6 +402,73 @@ with tab_label:
                                 st.error(f"刪除失敗：{e}")
         except Exception as e:
             st.error(f"載入失敗：{e}")
+
+    # ── ERP 下載 PDF ─────────────────────────────────────────────
+    with sub_tab_erp:
+        all_orders = st.session_state.parsed_orders
+
+        if not all_orders:
+            st.info("請先在左側上傳並解析銷貨單")
+        else:
+            st.caption("直接從 ERP 系統下載標籤 PDF（需要電腦可連到 ERP 網路）")
+
+            order_nos = [o.get("order_no", "") for o in all_orders if o.get("order_no")]
+            selected_nos = st.multiselect(
+                "選擇要下載的出貨單",
+                options=order_nos,
+                default=order_nos,
+            )
+
+            col1, col2 = st.columns(2)
+            with col1:
+                erp_user = st.text_input("ERP 帳號", value="BR026", key="erp_user")
+            with col2:
+                erp_pass = st.text_input("ERP 密碼", value="5403", type="password", key="erp_pass")
+
+            if selected_nos and st.button("從 ERP 下載標籤 PDF", type="primary", use_container_width=True):
+                with st.spinner("連線 ERP 並下載中，請稍候..."):
+                    try:
+                        from erp_downloader import download_label_pdfs, pack_zip
+                        results = download_label_pdfs(selected_nos, erp_user, erp_pass)
+
+                        success = {no: data for no, data in results.items() if data}
+                        failed  = [no for no, data in results.items() if not data]
+
+                        if success:
+                            if len(success) == 1:
+                                order_no, pdf_bytes = next(iter(success.items()))
+                                st.download_button(
+                                    f"⬇️ 下載 {order_no} 標籤.pdf",
+                                    data=pdf_bytes,
+                                    file_name=f"標籤_{order_no}.pdf",
+                                    mime="application/pdf",
+                                    use_container_width=True,
+                                )
+                            else:
+                                zip_bytes = pack_zip(success)
+                                st.download_button(
+                                    f"⬇️ 下載所有標籤 ({len(success)} 筆).zip",
+                                    data=zip_bytes,
+                                    file_name="ERP標籤.zip",
+                                    mime="application/zip",
+                                    use_container_width=True,
+                                )
+
+                        if failed:
+                            st.warning(f"以下出貨單下載失敗：{', '.join(failed)}")
+                        if not success and not failed:
+                            st.error("未取得任何 PDF，請確認 ERP 帳密與網路連線")
+
+                    except ImportError:
+                        st.error(
+                            "請先安裝 Playwright：\n"
+                            "```\npip install playwright\n"
+                            "python -m playwright install chromium\n```"
+                        )
+                    except Exception as e:
+                        st.error(f"下載失敗：{e}")
+                        import traceback
+                        st.code(traceback.format_exc())
 
 
 # ════════════════════════════════════════════════════════════════

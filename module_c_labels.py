@@ -21,7 +21,8 @@ LABEL_FONT  = Font(bold=True, size=9)
 # 所有可選欄位：顯示名稱 → 取值 function
 ALL_FIELDS = {
     "料號":     lambda item, order: item.get("item_no", ""),
-    "品名":     lambda item, order: item.get("description", ""),
+    "品名":     lambda item, order: item.get("name", ""),
+    "規格":     lambda item, order: item.get("description", ""),
     "數量":     lambda item, order: str(item.get("quantity", "")),
     "單位":     lambda item, order: item.get("unit", "PC"),
     "客戶料號": lambda item, order: item.get("remark", ""),
@@ -35,7 +36,7 @@ ALL_FIELDS = {
     "聯絡人":   lambda item, order: order.get("contact", ""),
 }
 
-DEFAULT_FIELDS = ["料號", "品名", "數量", "客戶料號", "批號", "客戶名稱", "出貨日期", "銷貨單號"]
+DEFAULT_FIELDS = ["料號", "品名", "規格", "數量", "客戶料號", "批號", "客戶名稱", "出貨日期", "銷貨單號"]
 
 
 def _fmt_date(d: str) -> str:

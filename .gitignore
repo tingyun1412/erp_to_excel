@@ -1,0 +1,13 @@
+﻿# 客戶 RTF 銷貨單 & Excel 模板（含敏感資料）
+files/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+venv/
+.venv/
+
+# Streamlit
+.streamlit/secrets.toml
