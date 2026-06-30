@@ -293,12 +293,19 @@ def parse_sales_order_rtf(file_path) -> dict:
     item_vals = [v for v in values[header_end:]
                  if not _is_header_noise(v) and v not in _person_skip]
 
+    # 格式B：第一個序號「之前」的規格值在 header_end 之前，需另外捕捉
+    pre_item_vals = [v for v in values[max(0, header_end - 30):header_end]
+                     if not _is_header_noise(v) and v not in _person_skip]
+
     first_seq_pos = next((i for i, v in enumerate(item_vals) if _is_seq(v)), None)
     format_b = (
         first_seq_pos is not None
         and first_seq_pos > 0
         and any(_is_spec(v) for v in item_vals[:first_seq_pos])
     )
+    # 格式B判斷：若 item_vals 前段沒有規格，也從 pre_item_vals 中找
+    if not format_b and first_seq_pos == 0 and any(_is_spec(v) for v in pre_item_vals):
+        format_b = True
 
     # 格式C：項次 → 數量 → 單位 → 料號 → 客戶料號 → 品名 → 規格
     # 判斷依據：項次後緊接著就是數量（格式A/B皆非如此）
@@ -308,7 +315,8 @@ def parse_sales_order_rtf(file_path) -> dict:
         format_c = _is_qty(nxt)
 
     if format_b:
-        result["items"] = _parse_format_b(item_vals, result["order_date"], customer_from_filename)
+        result["items"] = _parse_format_b(item_vals, result["order_date"], customer_from_filename,
+                                          pre_vals=pre_item_vals)
     elif format_c:
         result["items"] = _parse_format_c(item_vals, result["order_date"], customer_from_filename)
     else:
@@ -425,7 +433,7 @@ def _parse_format_a(vals, ship_date, customer):
     return items
 
 
-def _parse_format_b(vals, ship_date, customer):
+def _parse_format_b(vals, ship_date, customer, pre_vals=None):
     """格式B：規格 → 項次 → 數量 → 料號 → 客戶料號"""
     seq_positions = [i for i, v in enumerate(vals) if _is_seq(v)]
     items = []
@@ -433,6 +441,9 @@ def _parse_format_b(vals, ship_date, customer):
 
     for si, seq_pos in enumerate(seq_positions):
         spec_seg = vals[consumed_up_to : seq_pos]
+        # 第一個品項：規格在第一個序號「之前」，需從 pre_vals 補入
+        if si == 0 and pre_vals:
+            spec_seg = list(pre_vals) + list(spec_seg)
         desc_parts = [v for v in spec_seg if _is_spec(v) and not _is_part_no(v)]
 
         next_seq = seq_positions[si + 1] if si + 1 < len(seq_positions) else len(vals)

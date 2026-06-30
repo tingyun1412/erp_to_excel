@@ -544,19 +544,8 @@ def _extract_logo_images(ws_src) -> list[dict]:
                     rel_row    = anchor._from.row
                     col_letter = get_column_letter(anchor._from.col + 1)
             elif hasattr(anchor, '_from') and hasattr(anchor, 'to'):
-                fr, tr_ = anchor._from.row, anchor.to.row
-                fc, tc = anchor._from.col, anchor.to.col
-                cw = sum(int((ws_src.column_dimensions[get_column_letter(c+1)].width or 8.43) * 7)
-                         for c in range(fc, tc + 1))
-                ch = sum(int((ws_src.row_dimensions[r+1].height or 15) * 4 / 3)
-                         for r in range(fr, tr_ + 1))
-                # 跨超過 2 列或高度 > 150px → 背景圖/浮水印，跳過
-                if tr_ - fr > 1 or ch > 150:
-                    continue
-                if cw > 0 and ch > 0:
-                    w_px, h_px = cw, ch
-                rel_row    = fr
-                col_letter = get_column_letter(fc + 1)
+                # TwoCellAnchor 通常是背景圖/浮水印，全部跳過
+                continue
             elif isinstance(anchor, str):
                 m = re.match(r'^([A-Za-z]+)(\d+)$', anchor.strip())
                 if m:
@@ -574,7 +563,14 @@ def _extract_logo_images(ws_src) -> list[dict]:
             })
         except Exception:
             pass
-    return result
+
+    # 每欄只保留最上面那個 logo（rel_row 最小），去掉重複/背景圖
+    best: dict[str, dict] = {}
+    for logo in result:
+        col = logo['col']
+        if col not in best or logo['rel_row'] < best[col]['rel_row']:
+            best[col] = logo
+    return list(best.values())
 
 
 def _place_label_images(ws_out, logo_imgs: list, label_start_row: int, ws_tmpl=None):

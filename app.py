@@ -229,6 +229,36 @@ with tab_label:
                 else:
                     st.warning("請選擇至少一張銷貨單")
 
+                # 警告：模板無動態欄位 → 標籤只有固定文字
+                if selected_orders and order_tmpl_map:
+                    for _rec in order_tmpl_map.values():
+                        _info = template_from_json(_rec["設定JSON"])
+                        _dyn = [c for c in _info.get("cells", []) if c.get("field") != "__fixed__"]
+                        if not _dyn:
+                            st.error(
+                                f"⚠️ 模板「{_rec['廠商名稱']} — {_rec['模板名稱']}」沒有動態欄位，"
+                                "標籤將只顯示固定文字（無料號、品名等）。"
+                                "請到「管理模板」重新上傳並分析此模板。"
+                            )
+                            break
+
+                # 除錯詳情
+                with st.expander("🔍 解析詳情（除錯用）"):
+                    if selected_items:
+                        _item0 = selected_items[0][0]
+                        st.write("**第一個品項欄位：**")
+                        st.json({k: v for k, v in _item0.items() if k not in ("customer",)})
+                    if order_tmpl_map:
+                        _, _rec0 = next(iter(order_tmpl_map.items()))
+                        _inf0 = template_from_json(_rec0["設定JSON"])
+                        _dyn0 = [{"row": c["row"], "col": c["col"], "field": c["field"], "value": c["value"]}
+                                 for c in _inf0.get("cells", []) if c.get("field") != "__fixed__"]
+                        st.write(f"**模板動態欄位（{len(_dyn0)} 個）：**")
+                        st.json(_dyn0)
+                    if selected_orders:
+                        st.write("**raw_values（前 60 個）：**")
+                        st.json(selected_orders[0].get("raw_values", [])[:60])
+
                 if selected_orders and order_tmpl_map and st.button("產出標籤 Excel", type="primary", use_container_width=True):
                     with st.spinner("產出中..."):
                         try:
