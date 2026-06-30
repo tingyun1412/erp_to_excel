@@ -138,27 +138,72 @@ def _go_to_ship_orders(page, dbg, username: str = "", password: str = ""):
     dbg("03_order_list")
 
 
+def _active_frame(page, order_no: str = ""):
+    """
+    ERP 頁面常用 iframe 架構：主頁是外框，內容在子 frame。
+    先找含出貨單號的 frame；若找不到則找最大的非主 frame；最後 fallback 主 page。
+    """
+    frames = page.frames
+    if len(frames) <= 1:
+        return page  # 沒有 iframe，直接用 main frame
+
+    if order_no:
+        for f in frames[1:]:
+            try:
+                if f.locator(f"text={order_no}").count() > 0:
+                    return f
+            except Exception:
+                pass
+
+    # fallback：第一個非主 frame（通常是內容區）
+    return frames[1]
+
+
 def _download_one(page, order_no: str, dbg) -> bytes:
-    # 找含出貨單號的列
-    row = page.locator(f"tr:has-text('{order_no}')").first
+    # 等 table 出現（動態載入頁可能需要額外時間）
+    try:
+        page.wait_for_selector("table tr, iframe", timeout=15_000)
+    except Exception:
+        pass
+
+    frame = _active_frame(page, order_no)
+
+    # 在正確 frame 裡找出貨單列
+    row = frame.locator(f"tr:has-text('{order_no}')").first
     if row.count() == 0:
         # 嘗試搜尋欄位
-        search_inputs = page.locator("input[type='text']:visible")
-        if search_inputs.count() > 0:
-            search_inputs.first.fill(order_no)
-            search_inputs.first.press("Enter")
-            page.wait_for_load_state("networkidle", timeout=15_000)
-            row = page.locator(f"tr:has-text('{order_no}')").first
+        for s_sel in [
+            f"input[type='text'][id*='search' i]:visible",
+            "input[type='text']:visible",
+        ]:
+            search_inputs = frame.locator(s_sel)
+            if search_inputs.count() > 0:
+                search_inputs.first.fill(order_no)
+                search_inputs.first.press("Enter")
+                page.wait_for_load_state("networkidle", timeout=15_000)
+                frame = _active_frame(page, order_no)
+                row = frame.locator(f"tr:has-text('{order_no}')").first
+                if row.count() > 0:
+                    break
 
     if row.count() == 0:
-        # 截下頁面 title + URL + 前 500 字 HTML 供除錯
         url = page.url
         title = page.title()
-        html_preview = page.inner_text("body")[:500].replace("\n", " ")
+        frames_info = " | ".join(f.url for f in page.frames)
+        # 嘗試從所有 frame 取得頁面文字以輔助除錯
+        preview = ""
+        for f in page.frames:
+            try:
+                t = f.inner_text("body")[:300].replace("\n", " ")
+                if t.strip():
+                    preview += f"[{f.url[-40:]}] {t}  "
+            except Exception:
+                pass
         raise RuntimeError(
             f"找不到出貨單 {order_no}。"
             f"當前頁：{title} | {url}\n"
-            f"頁面內容預覽：{html_preview}"
+            f"Frames: {frames_info}\n"
+            f"頁面內容預覽：{preview[:500]}"
         )
 
     # 點「標籤」按鈕
@@ -166,8 +211,9 @@ def _download_one(page, order_no: str, dbg) -> bytes:
     page.wait_for_load_state("networkidle", timeout=20_000)
     dbg(f"04_label_{order_no}")
 
-    # 勾選全部 checkbox（如果有）
-    for cb in page.locator("input[type='checkbox']:visible").all():
+    # 勾選全部 checkbox（如果有）——同樣在正確 frame 裡找
+    frame2 = _active_frame(page)
+    for cb in frame2.locator("input[type='checkbox']:visible").all():
         try:
             if not cb.is_checked():
                 cb.check()
@@ -176,7 +222,7 @@ def _download_one(page, order_no: str, dbg) -> bytes:
 
     # 點「下載選取標籤」
     with page.expect_download(timeout=30_000) as dl_info:
-        page.locator("text=下載選取標籤").click()
+        frame2.locator("text=下載選取標籤").click()
 
     dl = dl_info.value
     pdf_bytes = Path(dl.path()).read_bytes()
