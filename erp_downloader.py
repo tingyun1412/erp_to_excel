@@ -45,7 +45,7 @@ def download_label_pdfs(
 
         for order_no in order_nos:
             try:
-                _go_to_ship_orders(page, dbg)
+                _go_to_ship_orders(page, dbg, username, password)
                 pdf = _download_one(page, order_no, dbg)
                 results[order_no] = pdf
             except Exception as e:
@@ -112,12 +112,22 @@ def _login(page, username, password, dbg):
     dbg("02_after_login")
 
 
-def _go_to_ship_orders(page, dbg):
-    # 每次都從首頁重新進入，避免前一張下載完後卡在標籤頁
+def _is_login_page(page) -> bool:
+    return page.locator("input[type='password']").count() > 0
+
+
+def _go_to_ship_orders(page, dbg, username: str = "", password: str = ""):
     page.goto(ERP_INDEX, timeout=30_000)
     page.wait_for_load_state("domcontentloaded")
 
-    # 優先找按鈕或連結，fallback 任意元素
+    # PDF 下載後 ERP session 可能失效，自動重新登入
+    if _is_login_page(page):
+        dbg("relogin_needed")
+        if username and password:
+            _login(page, username, password, dbg)
+        else:
+            raise RuntimeError("ERP session 已過期，無法自動重新登入（缺少帳密）")
+
     for sel in ["button:has-text('出貨單')", "a:has-text('出貨單')", "text=出貨單"]:
         loc = page.locator(sel)
         if loc.count() > 0:
