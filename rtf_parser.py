@@ -320,6 +320,8 @@ def _parse_format_a(vals, ship_date, customer):
         for v in seg:
             if _is_page_fraction(v) or _is_seq(v):
                 continue
+            if v in _FOOTER_STOP:
+                break
 
             if state == "spec":
                 if _is_qty(v):
@@ -355,11 +357,7 @@ def _parse_format_a(vals, ship_date, customer):
             elif state == "got_item_no":
                 if v in _FOOTER_STOP:
                     break
-                if _is_chinese(v):
-                    if len(v) <= 2 and item["unit"] == "PCS":
-                        item["unit"] = v   # 單位（個/支/片…）
-                    # 其他中文忽略
-                else:
+                if not _is_chinese(v):
                     post_vals.append(v)
 
         _classify_post_item(item, post_vals)

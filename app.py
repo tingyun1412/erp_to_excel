@@ -130,47 +130,48 @@ with tab_label:
                             return r
                     return None
 
-                col_left, col_right = st.columns([1, 1])
+                # 選銷貨單
+                order_options = {
+                    o.get("order_no", o.get("filename", f"單{i}")): o
+                    for i, o in enumerate(all_orders)
+                }
+                selected_order_nos = st.multiselect(
+                    "選擇要產生標籤的銷貨單",
+                    options=list(order_options.keys()),
+                    default=list(order_options.keys()),
+                )
+                selected_orders = [order_options[k] for k in selected_order_nos]
 
-                with col_left:
-                    # 選銷貨單
-                    order_options = {
-                        o.get("order_no", o.get("filename", f"單{i}")): o
-                        for i, o in enumerate(all_orders)
-                    }
-                    selected_order_nos = st.multiselect(
-                        "選擇要產生標籤的銷貨單",
-                        options=list(order_options.keys()),
-                        default=list(order_options.keys()),
-                    )
-                    selected_orders = [order_options[k] for k in selected_order_nos]
+                template_options = [
+                    f"{r['廠商名稱']} — {r['模板名稱']}"
+                    for r in all_templates
+                ]
 
-                with col_right:
-                    # 備用模板（自動比對失敗時使用）
-                    template_options = [
-                        f"{r['廠商名稱']} — {r['模板名稱']}"
-                        for r in all_templates
-                    ]
-                    fallback_idx = st.selectbox(
-                        "備用模板（無法自動比對時使用）",
-                        options=range(len(template_options)),
-                        format_func=lambda i: template_options[i],
-                    )
-                    fallback_record = all_templates[fallback_idx]
-
-                # 顯示每張銷貨單對應的模板
+                # 每張銷貨單獨立選擇模板（自動比對可手動覆蓋）
+                order_tmpl_map = {}
                 if selected_orders:
-                    st.markdown("**各銷貨單自動比對模板：**")
-                    order_tmpl_map = {}
+                    st.markdown("**各銷貨單模板（自動比對，可手動覆蓋）：**")
                     for o in selected_orders:
+                        order_key = o.get("order_no", o.get("filename", ""))
                         cname = o.get("customer_name", "")
-                        matched = _match_template(cname)
-                        rec = matched or fallback_record
-                        order_tmpl_map[o.get("order_no", o.get("filename", ""))] = rec
-                        status = "✅ 自動比對" if matched else "⚠️ 使用備用"
-                        st.caption(
-                            f"{o.get('order_no','')} — 客戶：{cname or '未知'}　{status}：{rec['廠商名稱']} — {rec['模板名稱']}"
+                        auto_match = _match_template(cname)
+                        default_idx = next(
+                            (i for i, r in enumerate(all_templates) if r is auto_match), 0
                         )
+                        _c1, _c2 = st.columns([5, 5])
+                        with _c1:
+                            _lbl = "✅ 自動" if auto_match else "⚠️ 未比對"
+                            st.caption(f"{_lbl}　{order_key}　{cname or '未知客戶'}")
+                        with _c2:
+                            _chosen = st.selectbox(
+                                "模板",
+                                options=range(len(template_options)),
+                                format_func=lambda i: template_options[i],
+                                index=default_idx,
+                                key=f"tmpl_sel_{order_key}",
+                                label_visibility="collapsed",
+                            )
+                        order_tmpl_map[order_key] = all_templates[_chosen]
 
                 # 顯示選取的品項
                 selected_items = [
@@ -191,19 +192,19 @@ with tab_label:
                         } for item, order in selected_items],
                         use_container_width=True,
                         hide_index=True,
+                        height=min(420, 38 * (len(selected_items) + 1) + 10),
                     )
                     st.caption(f"共 {len(selected_items)} 個品項，每張銷貨單一個工作表")
                 else:
                     st.warning("請選擇至少一張銷貨單")
 
-                if selected_orders and st.button("產出標籤 Excel", type="primary", use_container_width=True):
+                if selected_orders and order_tmpl_map and st.button("產出標籤 Excel", type="primary", use_container_width=True):
                     with st.spinner("產出中..."):
                         try:
                             pairs = []
                             for o in selected_orders:
-                                cname = o.get("customer_name", "")
-                                matched = _match_template(cname)
-                                rec = matched or fallback_record
+                                order_key = o.get("order_no", o.get("filename", ""))
+                                rec = order_tmpl_map.get(order_key, all_templates[0])
                                 tmpl_key = f"{rec['廠商名稱']}_{rec['模板名稱']}"
                                 wb_bytes = st.session_state.template_wb_bytes.get(tmpl_key)
                                 twb = (
@@ -224,41 +225,26 @@ with tab_label:
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                 use_container_width=True,
                             )
-
-                            # 提示缺少模板 Excel（無樣式時）
-                            missing = [
-                                f"{o.get('order_no','')} → {(order_tmpl_map.get(o.get('order_no','')) or fallback_record)['廠商名稱']}"
-                                for o in selected_orders
-                                if not st.session_state.template_wb_bytes.get(
-                                    f"{(order_tmpl_map.get(o.get('order_no','')) or fallback_record)['廠商名稱']}"
-                                    f"_{(order_tmpl_map.get(o.get('order_no','')) or fallback_record)['模板名稱']}"
-                                )
-                            ]
-                            if missing:
-                                st.info(
-                                    f"""以下銷貨單的模板尚未上傳原始 Excel（無樣式）：
-
-                                {chr(10).join(missing)}
-
-                                請到「管理模板」重新上傳對應模板 Excel。"""
-                                )
                         except Exception as e:
                             st.error(f"產出失敗：{e}")
                             import traceback
                             st.code(traceback.format_exc())
 
                 # 若模板 Excel 尚未上傳，提供重新上傳入口
-                unique_recs = {f"{r['廠商名稱']}_{r['模板名稱']}": r for r in order_tmpl_map.values()}.values() if selected_orders else []
-                for rec in unique_recs:
-                    tmpl_key = f"{rec['廠商名稱']}_{rec['模板名稱']}"
-                    if tmpl_key not in st.session_state.template_wb_bytes:
-                        re_upload = st.file_uploader(
-                            f"上傳「{rec['廠商名稱']} — {rec['模板名稱']}」原始 Excel（保留樣式用）",
+                if selected_orders and order_tmpl_map:
+                    _shown_keys = set()
+                    for _ok, _rec in order_tmpl_map.items():
+                        _tk = f"{_rec['廠商名稱']}_{_rec['模板名稱']}"
+                        if _tk in _shown_keys or _tk in st.session_state.template_wb_bytes:
+                            continue
+                        _shown_keys.add(_tk)
+                        _re = st.file_uploader(
+                            f"上傳「{_rec['廠商名稱']} — {_rec['模板名稱']}」原始 Excel（保留樣式用）",
                             type=["xlsx", "xls"],
-                            key=f"reupload_{tmpl_key}",
+                            key=f"reupload_{_tk}",
                         )
-                        if re_upload:
-                            st.session_state.template_wb_bytes[tmpl_key] = re_upload.read()
+                        if _re:
+                            st.session_state.template_wb_bytes[_tk] = _re.read()
                             st.rerun()
 
     # ── 管理模板 ──────────────────────────────────────────────
@@ -402,14 +388,25 @@ with tab_label:
                         cells = info.get("cells", [])
                         dynamic = [c for c in cells if c.get("field") != "__fixed__"]
                         st.write(f"動態欄位：{[c['field'] for c in dynamic]}")
-                        if st.button("刪除此模板", key=f"del_{r['廠商名稱']}_{r['模板名稱']}"):
-                            try:
-                                delete_template(r["廠商名稱"], r["模板名稱"])
-                                clear_cache()
-                                st.success("已刪除")
+                        _btn_edit, _btn_del = st.columns(2)
+                        with _btn_edit:
+                            if st.button("✏️ 編輯欄位", key=f"edit_{r['廠商名稱']}_{r['模板名稱']}"):
+                                st.session_state["_pending_template"] = dict(info)
+                                st.session_state["_pending_tmpl_bytes"] = st.session_state.template_wb_bytes.get(
+                                    f"{r['廠商名稱']}_{r['模板名稱']}", b""
+                                )
+                                st.session_state["_pending_customer"] = r["廠商名稱"]
+                                st.session_state["_pending_tmpl_name"] = r["模板名稱"]
                                 st.rerun()
-                            except Exception as e:
-                                st.error(f"刪除失敗：{e}")
+                        with _btn_del:
+                            if st.button("🗑 刪除此模板", key=f"del_{r['廠商名稱']}_{r['模板名稱']}"):
+                                try:
+                                    delete_template(r["廠商名稱"], r["模板名稱"])
+                                    clear_cache()
+                                    st.success("已刪除")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"刪除失敗：{e}")
         except Exception as e:
             st.error(f"載入失敗：{e}")
 
@@ -454,7 +451,7 @@ with tab_label:
         with col2:
             erp_pass = st.text_input("ERP 密碼", value="5403", type="password", key="erp_pass")
 
-        if selected_nos and st.button("從廠商網站下載標籤 PDF", type="primary", use_container_width=True):
+        if selected_nos and st.button("從廠商網站下載標籤xlsx", type="primary", use_container_width=True):
             with st.spinner("連線 ERP 並下載中，請稍候..."):
                 try:
                     from erp_downloader import download_label_pdfs, pack_zip

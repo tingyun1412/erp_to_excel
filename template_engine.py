@@ -8,7 +8,9 @@
 import copy
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+_TW = timezone(timedelta(hours=8))
 from io import BytesIO
 
 import openpyxl
@@ -39,7 +41,7 @@ def _fmt_date(d: str) -> str:
 
 
 def _fmt_lot_no(order_no: str, seq: int) -> str:
-    base = order_no[:8] if len(order_no) >= 8 else datetime.now().strftime("%Y%m%d")
+    base = order_no[:8] if len(order_no) >= 8 else datetime.now(_TW).strftime("%Y%m%d")
     return f"{base}{seq:04d}"
 
 
@@ -375,7 +377,7 @@ def _write_order_to_sheet(
     current_row = 1
 
     for item, order in all_items:
-        qty = max(int(item.get("quantity", 1) or 1), 1)
+        qty = 1  # 一張標籤顯示整批數量，不重複印
 
         if is_row_repeat:
             if header_cells:
@@ -521,11 +523,19 @@ def _copy_sheet_images(ws_src, ws_dst, row_offset: int = 0):
             else:
                 continue
 
-            new_img = XLImage(_io.BytesIO(raw))
-            if img.width:  new_img.width  = img.width
-            if img.height: new_img.height = img.height
-
             anchor = img.anchor
+            # 優先從 anchor extent 取顯示尺寸（EMU → 像素），比 img.width/height 準確
+            w, h = None, None
+            if hasattr(anchor, 'ext') and getattr(anchor.ext, 'cx', None):
+                w = int(anchor.ext.cx / 914400 * 96)
+                h = int(anchor.ext.cy / 914400 * 96)
+            elif img.width:
+                w, h = img.width, img.height
+
+            new_img = XLImage(_io.BytesIO(raw))
+            if w: new_img.width  = w
+            if h: new_img.height = h
+
             if isinstance(anchor, str):
                 m = re.match(r'^([A-Za-z]+)(\d+)$', anchor.strip())
                 if m:
