@@ -234,7 +234,11 @@ def parse_sales_order_rtf(file_path) -> dict:
     if not result["order_date"] and result["order_no"]:
         result["order_date"] = result["order_no"][:8]
 
-    item_vals = [v for v in values[header_end:] if not _is_header_noise(v)]
+    # 過濾表頭重印雜訊，同時排除 header 內出現的中文（例如聯絡人姓名）再次出現在品項中
+    header_known_chinese = {v for v in values[:header_end] if _is_chinese(v)}
+    item_vals = [v for v in values[header_end:]
+                 if not _is_header_noise(v)
+                 and not (_is_chinese(v) and v in header_known_chinese and not _is_seq(v))]
 
     first_seq_pos = next((i for i, v in enumerate(item_vals) if _is_seq(v)), None)
     format_b = (
@@ -444,8 +448,7 @@ def _parse_format_c(vals, ship_date, customer):
 
             elif state == "unit":
                 if _is_chinese(v) and len(v) <= 2:
-                    item["unit"] = v
-                    state = "item_no"
+                    state = "item_no"   # 跳過單位文字，固定使用 PCS
                 elif _is_part_no(v):
                     item["item_no"] = v
                     state = "post_item"

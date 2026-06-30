@@ -321,6 +321,21 @@ with tab_label:
             st.markdown("### 確認欄位對應")
             st.caption("檢查每個格子的欄位是否正確，可以修改")
 
+            # 名稱可編輯（新增時預填，編輯時可改名）
+            _ec1, _ec2 = st.columns(2)
+            with _ec1:
+                _edit_customer = st.text_input(
+                    "廠商名稱（用於比對）",
+                    value=st.session_state.get("_pending_customer", ""),
+                    key="_edit_customer_input",
+                )
+            with _ec2:
+                _edit_tmpl_name = st.text_input(
+                    "模板名稱",
+                    value=st.session_state.get("_pending_tmpl_name", ""),
+                    key="_edit_tmpl_name_input",
+                )
+
             field_options = ["__fixed__（固定文字）"] + [
                 f"{k}（{v}）" for k, v in DYNAMIC_FIELDS.items() if k != "固定文字"
             ]
@@ -354,8 +369,8 @@ with tab_label:
             if st.button("儲存模板", type="primary", use_container_width=True):
                 template_info["cells"] = updated_cells
                 config_json = template_to_json(template_info)
-                customer = st.session_state["_pending_customer"]
-                tmpl_name = st.session_state["_pending_tmpl_name"]
+                customer = _edit_customer.strip() or st.session_state.get("_pending_customer", "")
+                tmpl_name = _edit_tmpl_name.strip() or st.session_state.get("_pending_tmpl_name", "")
                 tmpl_key = f"{customer}_{tmpl_name}"
 
                 try:
@@ -461,19 +476,28 @@ with tab_label:
                     failed  = [no for no, data in results.items() if not data]
 
                     if success:
+                        order_no, pdf_bytes = next(iter(success.items()))
                         if len(success) == 1:
-                            from pdf_to_excel import pdf_to_excel
-
-                            order_no, pdf_bytes = next(iter(success.items()))
-
-                            excel_bytes = pdf_to_excel(pdf_bytes)
-
+                            # 單筆：先提供 PDF 下載，再嘗試轉 Excel
                             st.download_button(
-                                f"⬇️ 下載 {order_no} 標籤.xlsx",
-                                data=excel_bytes,
-                                file_name=f"標籤_{order_no}.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                f"⬇️ 下載 {order_no} 標籤.pdf（原始）",
+                                data=pdf_bytes,
+                                file_name=f"標籤_{order_no}.pdf",
+                                mime="application/pdf",
                             )
+                            try:
+                                from pdf_to_excel import pdf_to_excel
+                                excel_bytes = pdf_to_excel(pdf_bytes)
+                                st.download_button(
+                                    f"⬇️ 下載 {order_no} 標籤.xlsx（Excel）",
+                                    data=excel_bytes,
+                                    file_name=f"標籤_{order_no}.xlsx",
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                )
+                            except Exception as _xe:
+                                import traceback as _tb
+                                st.warning(f"PDF 轉 Excel 失敗（仍可下載 PDF）：{_xe}")
+                                st.code(_tb.format_exc())
                         else:
                             zip_bytes = pack_zip(success)
                             st.download_button(
@@ -485,18 +509,16 @@ with tab_label:
                             )
 
                     if failed:
-                        st.warning(f"以下出貨單下載失敗：{', '.join(failed)}")
+                        st.warning(f"以下出貨單下載失敗（ERP 端）：{', '.join(failed)}")
                     if not success and not failed:
                         st.error("未取得任何 PDF，請確認 ERP 帳密與網路連線")
 
-                except ImportError:
-                    st.error(
-                        "請先安裝 Playwright：\n"
-                        "```\npip install playwright\n"
-                        "python -m playwright install chromium\n```"
-                    )
+                except ImportError as e:
+                    st.error(f"缺少套件：{e}")
+                    import traceback
+                    st.code(traceback.format_exc())
                 except Exception as e:
-                    st.error(f"下載失敗：{e}")
+                    st.error(f"ERP 下載失敗：{e}")
                     import traceback
                     st.code(traceback.format_exc())
 
