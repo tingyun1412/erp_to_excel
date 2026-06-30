@@ -545,13 +545,14 @@ def _extract_logo_images(ws_src) -> list[dict]:
                     col_letter = get_column_letter(anchor._from.col + 1)
             elif hasattr(anchor, '_from') and hasattr(anchor, 'to'):
                 fr, tr_ = anchor._from.row, anchor.to.row
-                if tr_ - fr > 3:
-                    continue  # 跨太多列 → 背景圖，跳過
                 fc, tc = anchor._from.col, anchor.to.col
                 cw = sum(int((ws_src.column_dimensions[get_column_letter(c+1)].width or 8.43) * 7)
                          for c in range(fc, tc + 1))
                 ch = sum(int((ws_src.row_dimensions[r+1].height or 15) * 4 / 3)
                          for r in range(fr, tr_ + 1))
+                # 跨超過 2 列或高度 > 150px → 背景圖/浮水印，跳過
+                if tr_ - fr > 1 or ch > 150:
+                    continue
                 if cw > 0 and ch > 0:
                     w_px, h_px = cw, ch
                 rel_row    = fr
@@ -601,17 +602,15 @@ def _place_label_images(ws_out, logo_imgs: list, label_start_row: int, ws_tmpl=N
                 col_idx = column_index_from_string(col) - 1   # 0-based
                 row_idx = abs_row - 1                          # 0-based
 
-                col_w = ws_out.column_dimensions[col].width or 8.43
                 tmpl_r = limg['rel_row'] + 1
                 row_h = (ws_tmpl.row_dimensions[tmpl_r].height or 15) if ws_tmpl else 15
 
-                cell_w_emu = int(col_w * 7 * 9525)   # chars → px → EMU
                 cell_h_emu = int(row_h * 12700)       # pt → EMU
                 img_w_emu  = int(w_px * 9525)
                 img_h_emu  = int(h_px * 9525)
 
-                col_off = max(0, (cell_w_emu - img_w_emu) // 2)
-                row_off = max(0, (cell_h_emu - img_h_emu) // 2)
+                col_off = 0                                        # 靠左
+                row_off = max(0, (cell_h_emu - img_h_emu) // 2)  # 上下置中
 
                 anch        = OneCellAnchor()
                 anch._from  = AnchorMarker(col=col_idx, colOff=col_off,

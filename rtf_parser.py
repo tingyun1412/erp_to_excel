@@ -100,9 +100,13 @@ def extract_field_values(rtf_bytes: bytes) -> list[str]:
             return False
 
         filtered = [(p, v) for p, v in matches if _in_table(p)]
-        # 只有過濾後的序號數量與全文一致，才採用 table-only（避免漏掉任何品項）
-        _seq = lambda lst: sum(1 for _, v in lst if re.match(r'^0[0-9]{3}$', v))
-        if filtered and _seq(filtered) >= _seq(matches):
+        # 只有「全文有重複序號」（多頁文件換頁重印）時才啟用 table-only 過濾。
+        # 其他情況（單頁、格式B）退回全文，避免漏掉品名/料號等在 table 外的值。
+        all_seqs     = [v for _, v in matches  if re.match(r'^0[0-9]{3}$', v)]
+        filt_seqs    = [v for _, v in filtered if re.match(r'^0[0-9]{3}$', v)]
+        has_dup      = len(all_seqs) > len(set(all_seqs))
+        seq_ok       = set(filt_seqs) == set(all_seqs)
+        if has_dup and filtered and seq_ok:
             matches = filtered
 
     matches.sort(key=lambda x: x[0])
