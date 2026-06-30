@@ -234,11 +234,17 @@ def parse_sales_order_rtf(file_path) -> dict:
     if not result["order_date"] and result["order_no"]:
         result["order_date"] = result["order_no"][:8]
 
-    # 過濾表頭重印雜訊，同時排除 header 內出現的中文（例如聯絡人姓名）再次出現在品項中
-    header_known_chinese = {v for v in values[:header_end] if _is_chinese(v)}
+    # 找出所有緊接在員工標籤（業務：/ 審核：/ 經辦人：）後的中文名字，排除出品項
+    _STAFF_LABELS = {"業務：", "審核：", "經辦人：", "客戶簽收："}
+    _person_skip: set[str] = set()
+    for _pi, _pv in enumerate(values):
+        if _pv in _STAFF_LABELS and _pi + 1 < len(values):
+            _nx = values[_pi + 1]
+            if _is_chinese(_nx) and len(_nx) <= 4:
+                _person_skip.add(_nx)
+
     item_vals = [v for v in values[header_end:]
-                 if not _is_header_noise(v)
-                 and not (_is_chinese(v) and v in header_known_chinese and not _is_seq(v))]
+                 if not _is_header_noise(v) and v not in _person_skip]
 
     first_seq_pos = next((i for i, v in enumerate(item_vals) if _is_seq(v)), None)
     format_b = (

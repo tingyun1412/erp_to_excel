@@ -3,7 +3,9 @@ Google Sheets 資料庫層
 只保留：標籤模板管理
 """
 import json
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+_TW = timezone(timedelta(hours=8))
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
@@ -78,7 +80,7 @@ def load_templates(customer: str = "") -> list[dict]:
 def save_template(customer: str, template_name: str, config_json: str):
     ws = get_sheet(SHEET_TEMPLATES)
     records = _rows_to_records(ws.get_all_values(), TEMPLATES_HEADERS)
-    now = datetime.now().strftime("%Y/%m/%d %H:%M")
+    now = datetime.now(_TW).strftime("%Y/%m/%d %H:%M")
     for i, r in enumerate(records):
         if r.get("廠商名稱") == customer and r.get("模板名稱") == template_name:
             ws.update_cell(i + 2, 3, config_json)

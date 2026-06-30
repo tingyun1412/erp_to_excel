@@ -193,6 +193,12 @@ with tab_label:
                         use_container_width=True,
                         hide_index=True,
                         height=min(420, 38 * (len(selected_items) + 1) + 10),
+                        column_config={
+                            "銷貨單號": st.column_config.TextColumn(width="medium"),
+                            "批號":     st.column_config.TextColumn(width="medium"),
+                            "料號":     st.column_config.TextColumn(width="large"),
+                            "規格":     st.column_config.TextColumn(width="medium"),
+                        },
                     )
                     st.caption(f"共 {len(selected_items)} 個品項，每張銷貨單一個工作表")
                 else:
