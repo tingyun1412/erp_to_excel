@@ -48,29 +48,57 @@ def _is_header_noise(v: str) -> bool:
     return False
 
 
-def extract_field_values(rtf_bytes: bytes) -> list[str]:
-    """
-    提取 RTF 中所有欄位值（ASCII + 中文），按檔案位置排序，相鄰重複去除。
-    ASCII 值來自 \\loch\\f18；中文值來自 \\hich\\af1\\dbch\\f18 的 Hex 編碼。
-    """
-    text = rtf_bytes.decode("cp950", errors="replace")
+def _extract_raw_matches(text: str) -> list[tuple[int, str]]:
+    """Extract all (pos, value) from \\loch and \\hich sequences."""
     matches = []
-
     for m in re.finditer(r"\\loch\\f18 ([^\r\n\\}]+)", text):
         v = m.group(1).strip()
         if v and v not in (":", " ", "  "):
             matches.append((m.start(), v))
-
-    _p_dbch = re.compile(r"\\hich\\af1\\dbch\\f18 ((?:\\'[0-9a-fA-F]{2}[\r\n\s]*)+)")
-    for m in _p_dbch.finditer(text):
-        hex_part = m.group(1)
+    for m in re.compile(r"\\hich\\af1\\dbch\\f18 ((?:\\'[0-9a-fA-F]{2}[\r\n\s]*)+)").finditer(text):
         try:
-            hbytes = bytes(int(x, 16) for x in re.findall(r"'([0-9a-fA-F]{2})", hex_part))
-            decoded = hbytes.decode("cp950", errors="replace").strip()
+            hb = bytes(int(x, 16) for x in re.findall(r"'([0-9a-fA-F]{2})", m.group(1)))
+            decoded = hb.decode("cp950", errors="replace").strip()
             if decoded:
                 matches.append((m.start(), decoded))
         except Exception:
             pass
+    return matches
+
+
+def extract_field_values(rtf_bytes: bytes) -> list[str]:
+    """
+    只從 RTF 表格欄位（\\trowd…\\row 區塊）提取文字值。
+    文字框、頁首、簽收區等不在 table 裡的內容自動排除。
+    若偵測不到任何 table，退回全文提取（相容性保底）。
+    """
+    text = rtf_bytes.decode("cp950", errors="replace")
+
+    # 找出所有 \trowd..\row 區塊（table 列）
+    row_spans: list[tuple[int, int]] = []
+    for m in re.finditer(r'\\trowd\b', text):
+        end_m = re.search(r'\\row\b', text[m.start():])
+        if end_m:
+            row_spans.append((m.start(), m.start() + end_m.end()))
+    row_spans.sort()
+
+    matches = _extract_raw_matches(text)
+
+    if row_spans:
+        # 二元搜尋，只保留在 table 列內的 matches
+        def _in_table(pos: int) -> bool:
+            lo, hi = 0, len(row_spans) - 1
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                s, e = row_spans[mid]
+                if s <= pos < e:
+                    return True
+                elif pos < s:
+                    hi = mid - 1
+                else:
+                    lo = mid + 1
+            return False
+        matches = [(p, v) for p, v in matches if _in_table(p)]
 
     matches.sort(key=lambda x: x[0])
     values: list[str] = []

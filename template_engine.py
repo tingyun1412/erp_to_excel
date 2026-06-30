@@ -351,6 +351,7 @@ def _write_order_to_sheet(
     ws_tmpl,
     template_info: dict,
     orders: list[dict],
+    logo_imgs: list = None,
 ):
     """Put all items from `orders` into `ws_out` using `template_info`."""
     unit_rows        = template_info["unit_rows"]
@@ -380,6 +381,10 @@ def _write_order_to_sheet(
         qty = 1  # 一張標籤顯示整批數量，不重複印
 
         if is_row_repeat:
+            # 每個 label 放置 logo（header row 起始）
+            if logo_imgs:
+                _place_label_images(ws_out, logo_imgs, current_row, ws_tmpl)
+
             if header_cells:
                 for hc in header_cells:
                     cell = ws_out.cell(row=current_row, column=hc["col"], value=hc["value"])
@@ -408,6 +413,10 @@ def _write_order_to_sheet(
                 for rel_row_str, height in row_heights.items():
                     abs_row = current_row + int(rel_row_str) - 1
                     ws_out.row_dimensions[abs_row].height = height
+
+                # 每個 label block 放置 logo
+                if logo_imgs:
+                    _place_label_images(ws_out, logo_imgs, current_row, ws_tmpl)
 
                 for unit_idx in range(units_per_row):
                     label_seq = label_row * units_per_row + unit_idx + 1
@@ -445,9 +454,8 @@ def generate_from_template(
         for ch in r':\/? *[]':
             ws_name = ws_name.replace(ch, "_")
         ws_out = wb_out.create_sheet(title=ws_name)
-        if ws_tmpl:
-            _copy_sheet_images(ws_tmpl, ws_out, row_offset=0)
-        _write_order_to_sheet(ws_out, ws_tmpl, template_info, [order])
+        logo_imgs = _extract_logo_images(ws_tmpl) if ws_tmpl else []
+        _write_order_to_sheet(ws_out, ws_tmpl, template_info, [order], logo_imgs=logo_imgs)
 
     if not wb_out.sheetnames:
         wb_out.create_sheet("出貨標籤")
@@ -488,9 +496,8 @@ def generate_labels_multiorder(
         for ch in r':\/? *[]':
             ws_name = ws_name.replace(ch, "_")
         ws_out = wb_out.create_sheet(title=ws_name)
-        if ws_tmpl:
-            _copy_sheet_images(ws_tmpl, ws_out, row_offset=0)
-        _write_order_to_sheet(ws_out, ws_tmpl, tinfo, [order])
+        logo_imgs = _extract_logo_images(ws_tmpl) if ws_tmpl else []
+        _write_order_to_sheet(ws_out, ws_tmpl, tinfo, [order], logo_imgs=logo_imgs)
 
     if not wb_out.sheetnames:
         wb_out.create_sheet("出貨標籤")
@@ -501,14 +508,17 @@ def generate_labels_multiorder(
     return buf
 
 
-def _copy_sheet_images(ws_src, ws_dst, row_offset: int = 0):
-    """Copy images from ws_src to ws_dst, shifting down by row_offset rows (1-indexed)."""
+def _extract_logo_images(ws_src) -> list[dict]:
+    """
+    從模板提取 logo 圖片資訊。
+    跳過 TwoCellAnchor 跨超過 3 列的圖片（背景/浮水印），只保留真正的 logo。
+    回傳 list of {raw, w_px, h_px, col, rel_row (0-based)}
+    """
     import io as _io
-    from openpyxl.drawing.image import Image as XLImage
-
+    result = []
     for img in getattr(ws_src, '_images', []):
         try:
-            # Extract raw bytes — try _data() first (openpyxl internal), then ref
+            raw = None
             if hasattr(img, '_data') and callable(img._data):
                 raw = img._data()
             elif hasattr(img, 'ref'):
@@ -518,58 +528,100 @@ def _copy_sheet_images(ws_src, ws_dst, row_offset: int = 0):
                 elif hasattr(ref, 'read'):
                     ref.seek(0)
                     raw = ref.read()
-                else:
-                    continue
-            else:
+            if not raw:
                 continue
 
-            anchor = img.anchor
-            # 優先從 anchor extent 取顯示尺寸（EMU → 像素），比 img.width/height 準確
-            w, h = None, None
+            anchor  = img.anchor
+            w_px = h_px = None
+            rel_row   = 0     # 0-based row offset in template
+            col_letter = "A"
+
             if hasattr(anchor, 'ext') and getattr(anchor.ext, 'cx', None):
-                # OneCellAnchor / AbsoluteAnchor → 直接有 cx/cy (EMU)
-                w = int(anchor.ext.cx / 914400 * 96)
-                h = int(anchor.ext.cy / 914400 * 96)
+                # OneCellAnchor — use EMU directly
+                w_px = int(anchor.ext.cx / 914400 * 96)
+                h_px = int(anchor.ext.cy / 914400 * 96)
+                if hasattr(anchor, '_from'):
+                    rel_row    = anchor._from.row
+                    col_letter = get_column_letter(anchor._from.col + 1)
             elif hasattr(anchor, '_from') and hasattr(anchor, 'to'):
-                # TwoCellAnchor → 由儲存格寬高推算
-                try:
-                    fc, tc = anchor._from.col, anchor.to.col
-                    fr, tr_ = anchor._from.row, anchor.to.row
-                    # 欄寬：Excel 字元寬度單位，~7 px/char（預設 8.43 char）
-                    w = sum(
-                        int((ws_src.column_dimensions[get_column_letter(c+1)].width or 8.43) * 7)
-                        for c in range(fc, tc + 1)
-                    )
-                    # 列高：點數，1pt ≈ 4/3 px（預設 15pt）
-                    h = sum(
-                        int((ws_src.row_dimensions[r+1].height or 15) * 4 / 3)
-                        for r in range(fr, tr_ + 1)
-                    )
-                    if w <= 0 or h <= 0:
-                        w, h = None, None
-                except Exception:
-                    w, h = None, None
-            elif img.width:
-                w, h = img.width, img.height
-
-            new_img = XLImage(_io.BytesIO(raw))
-            if w: new_img.width  = w
-            if h: new_img.height = h
-
-            if isinstance(anchor, str):
+                fr, tr_ = anchor._from.row, anchor.to.row
+                if tr_ - fr > 3:
+                    continue  # 跨太多列 → 背景圖，跳過
+                fc, tc = anchor._from.col, anchor.to.col
+                cw = sum(int((ws_src.column_dimensions[get_column_letter(c+1)].width or 8.43) * 7)
+                         for c in range(fc, tc + 1))
+                ch = sum(int((ws_src.row_dimensions[r+1].height or 15) * 4 / 3)
+                         for r in range(fr, tr_ + 1))
+                if cw > 0 and ch > 0:
+                    w_px, h_px = cw, ch
+                rel_row    = fr
+                col_letter = get_column_letter(fc + 1)
+            elif isinstance(anchor, str):
                 m = re.match(r'^([A-Za-z]+)(\d+)$', anchor.strip())
                 if m:
-                    new_img.anchor = f"{m.group(1)}{int(m.group(2)) + row_offset}"
-                else:
-                    new_img.anchor = anchor
-            elif hasattr(anchor, '_from'):
-                orig = anchor._from
-                col_letter = get_column_letter(orig.col + 1)
-                new_img.anchor = f"{col_letter}{orig.row + 1 + row_offset}"
-            else:
-                new_img.anchor = f"A{1 + row_offset}"
+                    col_letter = m.group(1)
+                    rel_row    = int(m.group(2)) - 1
+                if img.width:
+                    w_px, h_px = img.width, img.height
 
-            ws_dst.add_image(new_img)
+            if not w_px or not h_px:
+                continue
+
+            result.append({
+                'raw': raw, 'w_px': w_px, 'h_px': h_px,
+                'col': col_letter, 'rel_row': rel_row,
+            })
+        except Exception:
+            pass
+    return result
+
+
+def _place_label_images(ws_out, logo_imgs: list, label_start_row: int, ws_tmpl=None):
+    """每個 label 各放一份 logo，置中於所在儲存格。"""
+    import io as _io
+    from openpyxl.drawing.image import Image as XLImage
+
+    for limg in logo_imgs:
+        try:
+            col     = limg['col']
+            abs_row = label_start_row + limg['rel_row']  # 1-based
+            w_px    = limg['w_px']
+            h_px    = limg['h_px']
+
+            new_img        = XLImage(_io.BytesIO(limg['raw']))
+            new_img.width  = w_px
+            new_img.height = h_px
+
+            # 置中：用 OneCellAnchor + colOff/rowOff
+            try:
+                from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor, AnchorMarker
+                from openpyxl.drawing.xdr import XDRPositiveSize2D
+                from openpyxl.utils import column_index_from_string
+
+                col_idx = column_index_from_string(col) - 1   # 0-based
+                row_idx = abs_row - 1                          # 0-based
+
+                col_w = ws_out.column_dimensions[col].width or 8.43
+                tmpl_r = limg['rel_row'] + 1
+                row_h = (ws_tmpl.row_dimensions[tmpl_r].height or 15) if ws_tmpl else 15
+
+                cell_w_emu = int(col_w * 7 * 9525)   # chars → px → EMU
+                cell_h_emu = int(row_h * 12700)       # pt → EMU
+                img_w_emu  = int(w_px * 9525)
+                img_h_emu  = int(h_px * 9525)
+
+                col_off = max(0, (cell_w_emu - img_w_emu) // 2)
+                row_off = max(0, (cell_h_emu - img_h_emu) // 2)
+
+                anch        = OneCellAnchor()
+                anch._from  = AnchorMarker(col=col_idx, colOff=col_off,
+                                           row=row_idx, rowOff=row_off)
+                anch.ext    = XDRPositiveSize2D(cx=img_w_emu, cy=img_h_emu)
+                new_img.anchor = anch
+            except Exception:
+                new_img.anchor = f"{col}{abs_row}"
+
+            ws_out.add_image(new_img)
         except Exception:
             pass
 
