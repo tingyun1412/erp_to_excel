@@ -2,6 +2,7 @@
 Google Sheets 資料庫層
 只保留：標籤模板管理
 """
+import time
 import json
 from datetime import datetime, timezone, timedelta
 
@@ -20,6 +21,18 @@ SHEET_TEMPLATES  = "標籤模板"
 TEMPLATES_HEADERS = ["廠商名稱", "模板名稱", "設定JSON", "最後更新"]
 
 
+def _retry(fn, retries: int = 4):
+    """Retry fn on 429 with exponential back-off (1 / 2 / 4 / 8 s)."""
+    for attempt in range(retries):
+        try:
+            return fn()
+        except Exception as e:
+            if "429" in str(e) and attempt < retries - 1:
+                time.sleep(2 ** attempt)
+            else:
+                raise
+
+
 @st.cache_resource
 def get_client():
     creds_dict = dict(st.secrets["gcp_service_account"])
@@ -27,7 +40,9 @@ def get_client():
     return gspread.authorize(creds)
 
 
+@st.cache_resource
 def get_sheet(sheet_name: str):
+    """Cache the worksheet object — avoids repeated open_by_key + worksheet() calls."""
     client = get_client()
     spreadsheet = client.open_by_key(SPREADSHEET_ID)
     try:
@@ -71,7 +86,7 @@ def _rows_to_records(rows: list[list], headers: list[str]) -> list[dict]:
 @st.cache_data(ttl=120)
 def load_templates(customer: str = "") -> list[dict]:
     ws = get_sheet(SHEET_TEMPLATES)
-    records = _rows_to_records(ws.get_all_values(), TEMPLATES_HEADERS)
+    records = _rows_to_records(_retry(ws.get_all_values), TEMPLATES_HEADERS)
     if customer:
         return [r for r in records if r.get("廠商名稱") == customer]
     return records
@@ -79,22 +94,22 @@ def load_templates(customer: str = "") -> list[dict]:
 
 def save_template(customer: str, template_name: str, config_json: str):
     ws = get_sheet(SHEET_TEMPLATES)
-    records = _rows_to_records(ws.get_all_values(), TEMPLATES_HEADERS)
+    records = _rows_to_records(_retry(ws.get_all_values), TEMPLATES_HEADERS)
     now = datetime.now(_TW).strftime("%Y/%m/%d %H:%M")
     for i, r in enumerate(records):
         if r.get("廠商名稱") == customer and r.get("模板名稱") == template_name:
-            ws.update_cell(i + 2, 3, config_json)
-            ws.update_cell(i + 2, 4, now)
+            # batch update 取代兩次 update_cell，省一次 API 呼叫
+            _retry(lambda: ws.update(f"C{i+2}:D{i+2}", [[config_json, now]]))
             return
-    ws.append_row([customer, template_name, config_json, now])
+    _retry(lambda: ws.append_row([customer, template_name, config_json, now]))
 
 
 def delete_template(customer: str, template_name: str):
     ws = get_sheet(SHEET_TEMPLATES)
-    records = _rows_to_records(ws.get_all_values(), TEMPLATES_HEADERS)
+    records = _rows_to_records(_retry(ws.get_all_values), TEMPLATES_HEADERS)
     for i, r in enumerate(records):
         if r.get("廠商名稱") == customer and r.get("模板名稱") == template_name:
-            ws.delete_rows(i + 2)
+            _retry(lambda: ws.delete_rows(i + 2))
             return
 
 
