@@ -117,6 +117,7 @@ def _is_login_page(page) -> bool:
 
 
 def _go_to_ship_orders(page, dbg, username: str = "", password: str = ""):
+    import re as _re
     page.goto(ERP_INDEX, timeout=30_000)
     page.wait_for_load_state("domcontentloaded")
 
@@ -128,13 +129,40 @@ def _go_to_ship_orders(page, dbg, username: str = "", password: str = ""):
         else:
             raise RuntimeError("ERP session 已過期，無法自動重新登入（缺少帳密）")
 
-    for sel in ["button:has-text('出貨單')", "a:has-text('出貨單')", "text=出貨單"]:
-        loc = page.locator(sel)
-        if loc.count() > 0:
-            loc.first.click()
-            break
+    # 取出「出貨單」連結的 href，直接 goto（比 click 可靠）
+    nav_url = None
+    try:
+        link = page.locator("a:has-text('出貨單')").first
+        href = link.get_attribute("href", timeout=3_000)
+        if href and not href.lower().startswith("javascript") and href != "#":
+            base = _re.match(r'https?://[^/]+', page.url).group()
+            if href.startswith("http"):
+                nav_url = href
+            elif href.startswith("/"):
+                nav_url = base + href
+            else:
+                # 相對路徑 e.g. "MA10.aspx"
+                folder = _re.match(r'(https?://[^/]+(?:/[^/]+/)?)', page.url).group(1)
+                nav_url = folder + href
+    except Exception:
+        pass
+
+    if nav_url:
+        page.goto(nav_url, timeout=30_000)
+    else:
+        # Fallback：直接 click
+        for sel in ["a:has-text('出貨單')", "button:has-text('出貨單')", "text=出貨單"]:
+            loc = page.locator(sel)
+            if loc.count() > 0:
+                loc.first.click()
+                break
 
     page.wait_for_load_state("networkidle", timeout=20_000)
+    # 等待 table 出現（動態載入）
+    try:
+        page.wait_for_selector("table", timeout=10_000)
+    except Exception:
+        pass
     dbg("03_order_list")
 
 

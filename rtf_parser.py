@@ -98,7 +98,11 @@ def extract_field_values(rtf_bytes: bytes) -> list[str]:
                 else:
                     lo = mid + 1
             return False
-        matches = [(p, v) for p, v in matches if _in_table(p)]
+
+        filtered = [(p, v) for p, v in matches if _in_table(p)]
+        # 過濾結果必須含有項次號（0001…）才採用；否則退回全文（相容性保底）
+        if filtered and any(re.match(r'^0[0-9]{3}$', v) for _, v in filtered):
+            matches = filtered
 
     matches.sort(key=lambda x: x[0])
     values: list[str] = []
