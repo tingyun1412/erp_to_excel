@@ -465,13 +465,17 @@ with tab_label:
 
                     if success:
                         if len(success) == 1:
+                            from pdf_to_excel import pdf_to_excel
+
                             order_no, pdf_bytes = next(iter(success.items()))
+
+                            excel_bytes = pdf_to_excel(pdf_bytes)
+
                             st.download_button(
-                                f"⬇️ 下載 {order_no} 標籤.pdf",
-                                data=pdf_bytes,
-                                file_name=f"標籤_{order_no}.pdf",
-                                mime="application/pdf",
-                                use_container_width=True,
+                                f"⬇️ 下載 {order_no} 標籤.xlsx",
+                                data=excel_bytes,
+                                file_name=f"標籤_{order_no}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             )
                         else:
                             zip_bytes = pack_zip(success)
