@@ -100,8 +100,9 @@ def extract_field_values(rtf_bytes: bytes) -> list[str]:
             return False
 
         filtered = [(p, v) for p, v in matches if _in_table(p)]
-        # 過濾結果必須含有項次號（0001…）才採用；否則退回全文（相容性保底）
-        if filtered and any(re.match(r'^0[0-9]{3}$', v) for _, v in filtered):
+        # 只有過濾後的序號數量與全文一致，才採用 table-only（避免漏掉任何品項）
+        _seq = lambda lst: sum(1 for _, v in lst if re.match(r'^0[0-9]{3}$', v))
+        if filtered and _seq(filtered) >= _seq(matches):
             matches = filtered
 
     matches.sort(key=lambda x: x[0])
