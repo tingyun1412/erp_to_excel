@@ -118,21 +118,27 @@ def _is_login_page(page) -> bool:
 
 
 def _click_nav_ship_orders(page) -> bool:
-    """在所有 frame 裡找「出貨單」導覽元素並點擊，成功回傳 True。"""
+    """
+    點「出貨單」導覽按鈕（ASP.NET PostBack: id=ctl00_btnMA06）。
+    先用 ID 精確定位，找不到再用文字 fallback。
+    點擊後等待 PostBack 完成（networkidle）。
+    """
     for frame in page.frames:
-        # 跳過 about:blank（Google Translate 等注入 iframe，不可能有導覽列）
         try:
-            if frame.url in ("about:blank", ""):
+            if (frame.url or "") in ("about:blank", ""):
                 continue
-        except Exception:
-            continue
-        try:
-            loc = frame.locator(
-                "a:has-text('出貨單'), button:has-text('出貨單'), "
-                "td:has-text('出貨單'), span:has-text('出貨單'), li:has-text('出貨單')"
-            )
+            # 優先：已知 ASP.NET 控制項 ID
+            loc = frame.locator("#ctl00_btnMA06")
+            if loc.count() == 0:
+                # Fallback：文字包含「出貨單」的 <a>
+                loc = frame.locator("a:has-text('出貨單')")
             if loc.count() > 0:
-                loc.first.click(timeout=3_000)
+                loc.first.click(timeout=5_000)
+                # PostBack 是同步 form submit，等待頁面重新載入
+                try:
+                    page.wait_for_load_state("networkidle", timeout=20_000)
+                except Exception:
+                    pass
                 return True
         except Exception:
             pass
@@ -140,7 +146,7 @@ def _click_nav_ship_orders(page) -> bool:
 
 
 def _go_to_ship_orders(page, dbg, username: str = "", password: str = ""):
-    """確保 session 有效後點「出貨單」，不等 table（由 _download_one 輪詢）。"""
+    """確保 session 有效後點「出貨單」，PostBack 後等頁面穩定。"""
     # ── session 失效偵測 ──
     if _is_login_page(page):
         dbg("relogin_needed")
@@ -151,16 +157,16 @@ def _go_to_ship_orders(page, dbg, username: str = "", password: str = ""):
 
     # ── 點「出貨單」──
     if not _click_nav_ship_orders(page):
-        # 若目前頁面沒有導覽列（如 PDF 下載結果頁），先回首頁
+        # 若目前頁面沒有導覽列（如 PDF 下載完成頁），先回首頁
         page.goto(ERP_INDEX, timeout=30_000)
         page.wait_for_load_state("networkidle", timeout=15_000)
         if _is_login_page(page):
             _login(page, username, password, dbg)
             page.wait_for_load_state("networkidle", timeout=20_000)
         if not _click_nav_ship_orders(page):
-            raise RuntimeError("在所有 frame 中找不到「出貨單」按鈕")
+            raise RuntimeError("找不到「出貨單」按鈕（#ctl00_btnMA06 / a:has-text）")
 
-    dbg("03_clicked_ship_orders")
+    dbg("03_after_postback")
 
 
 def _find_order_row(page, order_no: str):
