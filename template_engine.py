@@ -455,7 +455,8 @@ def generate_from_template(
         for ch in r':\/? *[]':
             ws_name = ws_name.replace(ch, "_")
         ws_out = wb_out.create_sheet(title=ws_name)
-        _write_order_to_sheet(ws_out, ws_tmpl, template_info, [order], logo_imgs=[])
+        logo_imgs = _extract_logo_images(ws_tmpl) if ws_tmpl else []
+        _write_order_to_sheet(ws_out, ws_tmpl, template_info, [order], logo_imgs=logo_imgs)
 
     if not wb_out.sheetnames:
         wb_out.create_sheet("出貨標籤")
@@ -496,7 +497,8 @@ def generate_labels_multiorder(
         for ch in r':\/? *[]':
             ws_name = ws_name.replace(ch, "_")
         ws_out = wb_out.create_sheet(title=ws_name)
-        _write_order_to_sheet(ws_out, ws_tmpl, tinfo, [order], logo_imgs=[])
+        logo_imgs = _extract_logo_images(ws_tmpl) if ws_tmpl else []
+        _write_order_to_sheet(ws_out, ws_tmpl, tinfo, [order], logo_imgs=logo_imgs)
 
     if not wb_out.sheetnames:
         wb_out.create_sheet("出貨標籤")
@@ -543,16 +545,8 @@ def _extract_logo_images(ws_src) -> list[dict]:
                     rel_row    = anchor._from.row
                     col_letter = get_column_letter(anchor._from.col + 1)
             elif hasattr(anchor, '_from') and hasattr(anchor, 'to'):
-                # TwoCellAnchor：跨超過 3 列 → 背景/浮水印，跳過；其他視為 logo
-                span_rows = anchor.to.row - anchor._from.row
-                if span_rows > 3:
-                    continue
-                rel_row = anchor._from.row
-                col_letter = get_column_letter(anchor._from.col + 1)
-                if img.width and img.height:
-                    w_px, h_px = img.width, img.height
-                else:
-                    continue
+                # TwoCellAnchor 無法可靠定位，跳過避免 logo 跑到錯欄位
+                continue
             elif isinstance(anchor, str):
                 m = re.match(r'^([A-Za-z]+)(\d+)$', anchor.strip())
                 if m:
