@@ -105,8 +105,9 @@ def extract_field_values(rtf_bytes: bytes) -> list[str]:
         all_seqs     = [v for _, v in matches  if re.match(r'^0[0-9]{3}$', v)]
         filt_seqs    = [v for _, v in filtered if re.match(r'^0[0-9]{3}$', v)]
         has_dup      = len(all_seqs) > len(set(all_seqs))
-        seq_ok       = set(filt_seqs) == set(all_seqs)
-        if has_dup and filtered and seq_ok:
+        seq_ok       = bool(filt_seqs) and set(filt_seqs) == set(all_seqs)
+        # 只要 table 涵蓋所有序號就用 table-only（去掉文字框/頁眉等雜訊）
+        if filtered and seq_ok:
             matches = filtered
 
     matches.sort(key=lambda x: x[0])

@@ -367,12 +367,13 @@ def _write_order_to_sheet(
     header_cells = [c for c in cells_info if c.get("is_header")]
     data_cells   = [c for c in cells_info if not c.get("is_header")]
 
-    # 設定欄寬
+    # 設定欄寬（第 1 欄多加 2.5px ≈ 0.36 字元寬）
     for unit_idx in range(units_per_row):
         base = unit_idx * (columns_per_unit + gap_cols)
         for rel_col_str, width in col_widths.items():
             abs_col = base + int(rel_col_str)
-            ws_out.column_dimensions[get_column_letter(abs_col)].width = width
+            extra = 0.36 if int(rel_col_str) == 1 else 0
+            ws_out.column_dimensions[get_column_letter(abs_col)].width = width + extra
 
     all_items = [(item, order) for order in orders for item in order.get("items", [])]
     current_row = 1

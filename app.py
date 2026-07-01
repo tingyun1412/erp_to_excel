@@ -464,6 +464,8 @@ with tab_label:
                         cells = info.get("cells", [])
                         dynamic = [c for c in cells if c.get("field") != "__fixed__"]
                         st.write(f"動態欄位：{[c['field'] for c in dynamic]}")
+                        if not dynamic:
+                            st.warning("⚠️ 無動態欄位，標籤將全為固定文字！請重新上傳 Excel 分析，或手動編輯欄位。")
                         _btn_edit, _btn_del = st.columns(2)
                         with _btn_edit:
                             if st.button("✏️ 編輯欄位", key=f"edit_{r['廠商名稱']}_{r['模板名稱']}"):
@@ -483,6 +485,28 @@ with tab_label:
                                     st.rerun()
                                 except Exception as e:
                                     st.error(f"刪除失敗：{e}")
+                        # 重新分析（上傳 Excel → 覆寫欄位設定）
+                        _tmpl_key = f"{r['廠商名稱']}_{r['模板名稱']}"
+                        _re_file = st.file_uploader(
+                            "🔄 重新分析（上傳原始 Excel 覆寫欄位）",
+                            type=["xlsx", "xls"],
+                            key=f"reanalyze_{_tmpl_key}",
+                        )
+                        if _re_file:
+                            _re_bytes = _re_file.read()
+                            _re_wb = openpyxl.load_workbook(BytesIO(_re_bytes))
+                            _re_sname = info.get("sheet_name", _re_wb.sheetnames[0])
+                            if _re_sname not in _re_wb.sheetnames:
+                                _re_sname = _re_wb.sheetnames[0]
+                            _re_info = analyze_template(_re_wb, _re_sname)
+                            if _re_info and _re_info.get("cells"):
+                                save_template(r["廠商名稱"], r["模板名稱"], template_to_json(_re_info))
+                                st.session_state.template_wb_bytes[_tmpl_key] = _re_bytes
+                                clear_cache()
+                                st.success(f"重新分析完成，找到 {len([c for c in _re_info['cells'] if c['field']!='__fixed__'])} 個動態欄位")
+                                st.rerun()
+                            else:
+                                st.error("分析失敗，此工作表無內容")
         except Exception as e:
             st.error(f"載入失敗：{e}")
 
