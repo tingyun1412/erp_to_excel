@@ -172,15 +172,28 @@ def _is_phone(v):
 def _is_page_fraction(v):
     return bool(re.match(r'^\d+\s*/\s*\d+$', v))
 
+def _is_invoice_no(v):
+    """台灣發票號碼：2大寫英文 + 8數字"""
+    return bool(re.match(r'^[A-Z]{2}\d{8}$', v))
+
 def _is_tax_id(v):
     if re.match(r'^\d{8}$', v): return True
-    if re.match(r'^[A-Z]{2}\d{8}$', v): return True
+    # 注意：[A-Z]{2}\d{8} 是發票號碼，不是統編，已獨立用 _is_invoice_no 判斷
     if re.match(r'^\d{3}-\d{9,}$', v): return True
     if re.match(r'^[A-Z]{3,5}-\d{8,}$', v): return True
     return False
 
+_CJK_PAT = re.compile(r'[一-鿿㐀-䶿豈-﫿]')
+
 def _is_chinese(v):
-    return bool(re.search(r'[一-鿿㐀-䶿]', v))
+    return bool(_CJK_PAT.search(v))
+
+def _split_cjk_prefix(v: str) -> tuple[str, str]:
+    """('頂針Φ') → ('頂針', 'Φ')  ── 返回純 CJK 前綴與剩餘部分。"""
+    i = 0
+    while i < len(v) and _CJK_PAT.match(v[i]):
+        i += 1
+    return v[:i], v[i:]
 
 def _is_part_no(v):
     if not v or len(v) < 5: return False
@@ -327,18 +340,28 @@ def _parse_items_by_position(rtf_bytes: bytes, ship_date: str, customer: str) ->
             item["item_no"] = gcv(1)[0] if gcv(1) else ""
 
             # Col 2: 品名 + 規格（合一文字框）
-            # 連續中文（≥2字）合併成品名，其後為規格
+            # 連續純 CJK 字元為品名，第一個非 CJK 字元（含混合值的後半）開始為規格
+            # 例：["頂針Φ", "0.7*10", "度", "*200um"]
+            #   → 品名="頂針"，規格="Φ 0.7*10 度 *200um"
             ns = gcv(2)
             name_parts: list[str] = []
-            desc_start = 0
-            for i, v in enumerate(ns):
-                if _is_chinese(v) and len(v) >= 2:
-                    name_parts.append(v)
-                    desc_start = i + 1
+            desc_vals: list[str] = []
+            _name_done = False
+            for v in ns:
+                if _name_done:
+                    desc_vals.append(v)
+                    continue
+                cjk, rest = _split_cjk_prefix(v)
+                if cjk:
+                    name_parts.append(cjk)
+                    if rest:          # 混合值：CJK 品名 + 非 CJK 規格起頭
+                        desc_vals.append(rest)
+                        _name_done = True
                 else:
-                    break
+                    _name_done = True
+                    desc_vals.append(v)
             item["name"] = "".join(name_parts)
-            item["description"] = " ".join(ns[desc_start:]).strip()
+            item["description"] = " ".join(desc_vals).strip()
 
             # Col 3: 數量
             qty_str = next((v for v in gcv(3) if _is_qty(v)), "")
@@ -353,6 +376,14 @@ def _parse_items_by_position(rtf_bytes: bytes, ship_date: str, customer: str) ->
                     post_vals.append(v)
 
             _classify_post_item(item, post_vals)
+
+            # 後置欄位中不符合批號/料號格式的值（如 *100um*12mm）→ 補入規格
+            _extra = [v for v in post_vals
+                      if not _is_12digit_lot(v) and not _is_rp_lot(v) and not _is_part_no(v)]
+            if _extra:
+                _extra_str = " ".join(_extra)
+                item["description"] = (item["description"] + " " + _extra_str).strip() if item["description"] else _extra_str
+
             items.append(item)
 
     items.sort(key=lambda x: x['seq'])
@@ -372,6 +403,7 @@ def parse_sales_order_rtf(file_path) -> dict:
         "order_no":          "",
         "order_date":        "",
         "customer_order_no": "",
+        "invoice_no":        "",
         "seller_tax_id":     "",
         "buyer_tax_id":      "",
         "buyer_id_raw":      "",
@@ -389,14 +421,37 @@ def parse_sales_order_rtf(file_path) -> dict:
 
     tax_ids, phones = [], []
     header_seen = set()
-    customer_code_found = False
+    _pending_tax_id   = False   # 剛看到「統一編號」標籤，等下一個值
+    _pending_inv_no   = False   # 剛看到「發票號碼」標籤，等下一個值
     for v in values[:header_end]:
         if v in header_seen:
             continue
         header_seen.add(v)
+
+        # 標籤追蹤（context-aware）
+        if v == "統一編號":
+            _pending_tax_id, _pending_inv_no = True, False
+            continue
+        if v == "發票號碼":
+            _pending_inv_no, _pending_tax_id = True, False
+            continue
+
+        # 標籤後的值對應
+        if _pending_tax_id and re.match(r'^\d{8}$', v) and not result["buyer_tax_id"]:
+            result["buyer_tax_id"] = v
+            result["buyer_id_raw"] = v
+            _pending_tax_id = False
+            continue
+        if _pending_inv_no and _is_invoice_no(v) and not result["invoice_no"]:
+            result["invoice_no"] = v
+            _pending_inv_no = False
+            continue
+
+        # 其他欄位（同時重置 pending 旗標，表示找到的不是期望值）
+        _pending_tax_id = _pending_inv_no = False
+
         if re.match(r'^C\d{4}(-\d+)?$', v):
             result["customer_code"] = v
-            customer_code_found = True
         elif re.match(r'^#\d+$', v):
             result["contact"] = v
         elif _is_date(v):
@@ -406,6 +461,8 @@ def parse_sales_order_rtf(file_path) -> dict:
                 result["order_no"] = v
             elif not result["customer_order_no"] and v != result["order_no"]:
                 result["customer_order_no"] = v
+        elif _is_invoice_no(v) and not result["invoice_no"]:
+            result["invoice_no"] = v   # fallback：不需標籤也捕捉
         elif _is_tax_id(v):
             if v not in tax_ids:
                 tax_ids.append(v)
@@ -415,10 +472,9 @@ def parse_sales_order_rtf(file_path) -> dict:
 
     result["customer_name"] = _extract_customer_name_from_values(values[:header_end])
 
+    # 統編：受票人（客戶）統編從 tax_ids 取（已優先從「統一編號」label 取）
     for tid in tax_ids:
-        if re.match(r'^\d{8}$', tid) and not result["seller_tax_id"]:
-            result["seller_tax_id"] = tid
-        elif not result["buyer_tax_id"]:
+        if not result["buyer_tax_id"]:
             result["buyer_tax_id"] = tid
             result["buyer_id_raw"] = tid
 

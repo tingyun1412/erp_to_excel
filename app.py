@@ -33,6 +33,8 @@ from template_engine import (
 from sheets_db import (
     load_templates, save_template, delete_template,
     clear_cache,
+    load_vendors, save_vendor, delete_vendor,
+    download_template_excel,
 )
 
 st.set_page_config(page_title="出貨自動化工具", page_icon="📦", layout="wide")
@@ -102,7 +104,7 @@ tab_label, tab_invoice = st.tabs([
 with tab_label:
     st.subheader("出貨標籤")
 
-    sub_tab_use, sub_tab_manage, sub_tab_erp = st.tabs(["產出標籤", "管理模板", "ERP 下載 PDF"])
+    sub_tab_use, sub_tab_manage, sub_tab_erp = st.tabs(["產出標籤", "管理模板", "從廠商網站下載標籤"])
 
     # ── 產出標籤 ──────────────────────────────────────────────
     with sub_tab_use:
@@ -116,6 +118,15 @@ with tab_label:
             except Exception as e:
                 st.error(f"載入模板失敗：{e}")
                 all_templates = []
+
+            # 自動從 Google Drive 補載尚未在 session 的模板 Excel
+            for _tr in (all_templates or []):
+                _tk = f"{_tr['廠商名稱']}_{_tr['模板名稱']}"
+                if _tk not in st.session_state.template_wb_bytes and _tr.get("Excel檔案ID"):
+                    try:
+                        st.session_state.template_wb_bytes[_tk] = download_template_excel(_tr["Excel檔案ID"])
+                    except Exception:
+                        pass
 
             if not all_templates:
                 st.warning("尚無任何標籤模板，請先到「管理模板」上傳")
@@ -242,23 +253,6 @@ with tab_label:
                             )
                             break
 
-                # 除錯詳情
-                with st.expander("🔍 解析詳情（除錯用）"):
-                    if selected_items:
-                        _item0 = selected_items[0][0]
-                        st.write("**第一個品項欄位：**")
-                        st.json({k: v for k, v in _item0.items() if k not in ("customer",)})
-                    if order_tmpl_map:
-                        _, _rec0 = next(iter(order_tmpl_map.items()))
-                        _inf0 = template_from_json(_rec0["設定JSON"])
-                        _dyn0 = [{"row": c["row"], "col": c["col"], "field": c["field"], "value": c["value"]}
-                                 for c in _inf0.get("cells", []) if c.get("field") != "__fixed__"]
-                        st.write(f"**模板動態欄位（{len(_dyn0)} 個）：**")
-                        st.json(_dyn0)
-                    if selected_orders:
-                        st.write("**raw_values（前 60 個）：**")
-                        st.json(selected_orders[0].get("raw_values", [])[:60])
-
                 if selected_orders and order_tmpl_map and st.button("產出標籤 Excel", type="primary", use_container_width=True):
                     with st.spinner("產出中..."):
                         try:
@@ -347,7 +341,7 @@ with tab_label:
                             try:
                                 vendor = new_customer.strip() or sname
                                 tname = new_tmpl_name.strip() or sname
-                                save_template(vendor, tname, template_to_json(info))
+                                save_template(vendor, tname, template_to_json(info), excel_bytes=tmpl_bytes)
                                 tmpl_key = f"{vendor}_{tname}"
                                 st.session_state.template_wb_bytes[tmpl_key] = tmpl_bytes
                                 saved += 1
@@ -410,11 +404,19 @@ with tab_label:
                     st.text(cell['value'][:40] if cell['value'] else "")
                 with c3:
                     current = cell.get("field", "__fixed__")
-                    # 找目前值在選項中的位置
-                    curr_display = next(
-                        (opt for opt in field_options if opt.startswith(current)),
-                        field_options[0]
-                    )
+                    # _inline 變體 (e.g. item_no_inline) → 找基底 key 對應選單
+                    _cur_base = current[:-len("_inline")] if current.endswith("_inline") else current
+                    # 選項格式：「__fixed__（固定文字）」或「中文名（field_key）」
+                    if _cur_base == "__fixed__":
+                        curr_display = next(
+                            (o for o in field_options if o.startswith("__fixed__")),
+                            field_options[0]
+                        )
+                    else:
+                        curr_display = next(
+                            (o for o in field_options if f"（{_cur_base}）" in o),
+                            field_options[0]
+                        )
                     chosen = st.selectbox(
                         "欄位",
                         field_options,
@@ -422,8 +424,19 @@ with tab_label:
                         key=f"field_map_{i}",
                         label_visibility="collapsed",
                     )
-                    # 取出 key（括號前）
-                    new_field = chosen.split("（")[0]
+                    # 取出內部 field key（括號內），保留 _inline 格式
+                    if chosen.startswith("__fixed__"):
+                        new_field = "__fixed__"
+                    else:
+                        _fm = re.search(r'（([^）]+)）', chosen)
+                        _base_new = _fm.group(1) if _fm else "__fixed__"
+                        # 若原本 inline 且選同一欄位 → 保留 inline；否則看 cell value 有無冒號前綴
+                        if current.endswith("_inline") and _base_new == _cur_base:
+                            new_field = current
+                        elif re.search(r'[：:]\s*$', cell.get("value", "")):
+                            new_field = f"{_base_new}_inline"
+                        else:
+                            new_field = _base_new
                     updated_cell = {**cell, "field": new_field}
                     updated_cells.append(updated_cell)
 
@@ -435,9 +448,10 @@ with tab_label:
                 tmpl_key = f"{customer}_{tmpl_name}"
 
                 try:
-                    save_template(customer, tmpl_name, config_json)
+                    _wb_bytes = st.session_state.get("_pending_tmpl_bytes") or b""
+                    save_template(customer, tmpl_name, config_json, excel_bytes=_wb_bytes or None)
                     # 快取 workbook bytes
-                    st.session_state.template_wb_bytes[tmpl_key] = st.session_state["_pending_tmpl_bytes"]
+                    st.session_state.template_wb_bytes[tmpl_key] = _wb_bytes
                     # 清除暫存
                     del st.session_state["_pending_template"]
                     del st.session_state["_pending_tmpl_bytes"]
@@ -500,7 +514,7 @@ with tab_label:
                                 _re_sname = _re_wb.sheetnames[0]
                             _re_info = analyze_template(_re_wb, _re_sname)
                             if _re_info and _re_info.get("cells"):
-                                save_template(r["廠商名稱"], r["模板名稱"], template_to_json(_re_info))
+                                save_template(r["廠商名稱"], r["模板名稱"], template_to_json(_re_info), excel_bytes=_re_bytes)
                                 st.session_state.template_wb_bytes[_tmpl_key] = _re_bytes
                                 clear_cache()
                                 st.success(f"重新分析完成，找到 {len([c for c in _re_info['cells'] if c['field']!='__fixed__'])} 個動態欄位")
@@ -510,105 +524,185 @@ with tab_label:
         except Exception as e:
             st.error(f"載入失敗：{e}")
 
-    # ── 廠商網站下載標籤 ─────────────────────────────────────────
+    # ── 從廠商網站下載標籤 ───────────────────────────────────────
     with sub_tab_erp:
-        st.caption("直接從廠商網站下載標籤 PDF（需要電腦可連到 ERP 網路），可從已解析的銷貨單勾選，或直接輸入銷貨單號")
+        st.caption("從廠商 ERP 網站下載標籤 PDF，可從已解析的銷貨單勾選或直接輸入單號")
 
-        all_orders = st.session_state.parsed_orders
-        order_nos_from_parsed = [o.get("order_no", "") for o in all_orders if o.get("order_no")]
+        # ── 廠商帳號管理 ──────────────────────────────────────────
+        _BUILTIN_VENDORS = [
+            {"公司名稱": "鴻勁", "網址": "http://scm.honprec.com/hp/Index.aspx",
+             "帳號": "BR026", "密碼": "5403"},
+        ]
 
-        input_mode = st.radio(
-            "選擇出貨單方式",
-            ["從已解析銷貨單勾選", "直接輸入銷貨單號"],
-            horizontal=True,
-        )
+        try:
+            _custom_vendors = load_vendors()
+        except Exception:
+            _custom_vendors = []
 
-        selected_nos = []
-        if input_mode == "從已解析銷貨單勾選":
-            if not order_nos_from_parsed:
-                st.info("尚無已解析的銷貨單，請先在左側上傳，或改用「直接輸入銷貨單號」")
-            else:
-                selected_nos = st.multiselect(
-                    "選擇要下載的出貨單",
-                    options=order_nos_from_parsed,
-                    default=order_nos_from_parsed,
-                )
-        else:
-            raw_text = st.text_area(
-                "輸入銷貨單號（可多筆，用換行或逗號分隔）",
-                placeholder="202606100012\n202606020007",
-                height=120,
-            )
-            selected_nos = [
-                n.strip() for n in re.split(r"[,\n，、]+", raw_text) if n.strip()
-            ]
-            if selected_nos:
-                st.caption(f"共 {len(selected_nos)} 筆：{', '.join(selected_nos)}")
+        # 合併：內建優先，避免重複
+        _builtin_names = {v["公司名稱"] for v in _BUILTIN_VENDORS}
+        _all_vendors = _BUILTIN_VENDORS + [v for v in _custom_vendors if v.get("公司名稱") not in _builtin_names]
 
-        col1, col2 = st.columns(2)
-        with col1:
-            erp_user = st.text_input("ERP 帳號", value="BR026", key="erp_user")
-        with col2:
-            erp_pass = st.text_input("ERP 密碼", value="5403", type="password", key="erp_pass")
+        if "vendor_selected" not in st.session_state:
+            st.session_state.vendor_selected = ""
+        if "show_add_vendor" not in st.session_state:
+            st.session_state.show_add_vendor = False
 
-        if selected_nos and st.button("從廠商網站下載標籤xlsx", type="primary", use_container_width=True):
-            with st.spinner("連線 ERP 並下載中，請稍候..."):
-                try:
-                    from erp_downloader import download_label_pdfs, pack_zip
-                    results, erp_errors = download_label_pdfs(selected_nos, erp_user, erp_pass)
+        st.markdown("**選擇廠商：**")
+        _vcols = st.columns(len(_all_vendors) + 1)
+        for _vi, _v in enumerate(_all_vendors):
+            with _vcols[_vi]:
+                _vtype = "primary" if st.session_state.vendor_selected == _v["公司名稱"] else "secondary"
+                if st.button(_v["公司名稱"], key=f"vbtn_{_vi}", type=_vtype, use_container_width=True):
+                    st.session_state.vendor_selected = _v["公司名稱"]
+                    st.session_state.show_add_vendor = False
+                    st.rerun()
+        with _vcols[-1]:
+            if st.button("＋ 新增廠商", key="add_vendor_btn", use_container_width=True):
+                st.session_state.show_add_vendor = not st.session_state.show_add_vendor
+                st.rerun()
 
-                    success = {no: data for no, data in results.items() if data}
-                    failed  = [no for no, data in results.items() if not data]
+        # 新增廠商表單
+        if st.session_state.show_add_vendor:
+            with st.form("add_vendor_form"):
+                _fc1, _fc2 = st.columns(2)
+                with _fc1:
+                    _vname = st.text_input("公司名稱 *")
+                    _vurl  = st.text_input("ERP 登入網址 *")
+                with _fc2:
+                    _vuser = st.text_input("帳號")
+                    _vpass = st.text_input("密碼", type="password")
+                _fs, _fc = st.columns(2)
+                with _fs:
+                    _do_save = st.form_submit_button("儲存", type="primary")
+                with _fc:
+                    _do_cancel = st.form_submit_button("取消")
 
-                    if success:
-                        order_no, pdf_bytes = next(iter(success.items()))
-                        if len(success) == 1:
-                            # 單筆：先提供 PDF 下載，再嘗試轉 Excel
-                            st.download_button(
-                                f"⬇️ 下載 {order_no} 標籤.pdf（原始）",
-                                data=pdf_bytes,
-                                file_name=f"標籤_{order_no}.pdf",
-                                mime="application/pdf",
-                            )
+                if _do_save:
+                    if _vname and _vurl:
+                        try:
+                            save_vendor(_vname, _vurl, _vuser, _vpass)
+                            clear_cache()
+                            st.session_state.show_add_vendor = False
+                            st.session_state.vendor_selected = _vname
+                            st.rerun()
+                        except Exception as _ve:
+                            st.error(f"儲存失敗：{_ve}")
+                    else:
+                        st.warning("公司名稱和網址為必填")
+                if _do_cancel:
+                    st.session_state.show_add_vendor = False
+                    st.rerun()
+
+        # ── 已選廠商 → 下載介面 ──────────────────────────────────
+        _sel_v = st.session_state.vendor_selected
+        if _sel_v:
+            _vrec = next((v for v in _all_vendors if v["公司名稱"] == _sel_v), None)
+            if _vrec:
+                # 非內建廠商才顯示刪除
+                if _sel_v not in _builtin_names:
+                    with st.expander(f"「{_sel_v}」設定"):
+                        st.caption(f"網址：{_vrec.get('網址','')}")
+                        if st.button(f"🗑 刪除「{_sel_v}」", key="del_vendor_btn"):
                             try:
-                                from pdf_to_excel import pdf_to_excel
-                                excel_bytes = pdf_to_excel(pdf_bytes)
-                                st.download_button(
-                                    f"⬇️ 下載 {order_no} 標籤.xlsx（Excel）",
-                                    data=excel_bytes,
-                                    file_name=f"標籤_{order_no}.xlsx",
-                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                )
-                            except Exception as _xe:
-                                import traceback as _tb
-                                st.warning(f"PDF 轉 Excel 失敗（仍可下載 PDF）：{_xe}")
-                                st.code(_tb.format_exc())
-                        else:
-                            zip_bytes = pack_zip(success)
-                            st.download_button(
-                                f"⬇️ 下載所有標籤 ({len(success)} 筆).zip",
-                                data=zip_bytes,
-                                file_name="ERP標籤.zip",
-                                mime="application/zip",
-                                use_container_width=True,
+                                delete_vendor(_sel_v)
+                                clear_cache()
+                                st.session_state.vendor_selected = ""
+                                st.rerun()
+                            except Exception as _de:
+                                st.error(f"刪除失敗：{_de}")
+                else:
+                    st.info(f"已選擇：**{_sel_v}**　　{_vrec.get('網址','')}")
+
+                _erp_all_orders = st.session_state.parsed_orders
+                _order_nos_parsed = [o.get("order_no", "") for o in _erp_all_orders if o.get("order_no")]
+
+                _input_mode = st.radio(
+                    "選擇出貨單方式",
+                    ["從已解析銷貨單勾選", "直接輸入銷貨單號"],
+                    horizontal=True,
+                    key="erp_input_mode",
+                )
+
+                _selected_nos: list[str] = []
+                if _input_mode == "從已解析銷貨單勾選":
+                    if not _order_nos_parsed:
+                        st.info("尚無已解析的銷貨單，請先在左側上傳，或改用「直接輸入銷貨單號」")
+                    else:
+                        _selected_nos = st.multiselect(
+                            "選擇要下載的出貨單",
+                            options=_order_nos_parsed,
+                            default=_order_nos_parsed,
+                            key="erp_order_multiselect",
+                        )
+                else:
+                    _raw_text = st.text_area(
+                        "輸入銷貨單號（可多筆，用換行或逗號分隔）",
+                        placeholder="202606100012\n202606020007",
+                        height=100,
+                        key="erp_order_text",
+                    )
+                    _selected_nos = [n.strip() for n in re.split(r"[,\n，、]+", _raw_text) if n.strip()]
+                    if _selected_nos:
+                        st.caption(f"共 {len(_selected_nos)} 筆")
+
+                if _selected_nos and st.button("從廠商網站下載標籤", type="primary",
+                                               use_container_width=True, key="erp_download_btn"):
+                    with st.spinner("連線 ERP 並下載中，請稍候..."):
+                        try:
+                            from erp_downloader import download_label_pdfs, pack_zip
+                            _results, _erp_errors = download_label_pdfs(
+                                _selected_nos,
+                                _vrec.get("帳號", ""),
+                                _vrec.get("密碼", ""),
                             )
+                            _success = {no: d for no, d in _results.items() if d}
+                            _failed  = [no for no, d in _results.items() if not d]
 
-                    if failed:
-                        st.warning(f"以下出貨單下載失敗（ERP 端）：{', '.join(failed)}")
-                        for _no in failed:
-                            if _no in erp_errors:
-                                st.code(f"[{_no}] {erp_errors[_no]}")
-                    if not success and not failed:
-                        st.error("未取得任何 PDF，請確認 ERP 帳密與網路連線")
+                            if _success:
+                                if len(_success) == 1:
+                                    _ono, _pdf = next(iter(_success.items()))
+                                    st.download_button(
+                                        f"⬇️ 下載 {_ono} 標籤.pdf",
+                                        data=_pdf,
+                                        file_name=f"標籤_{_ono}.pdf",
+                                        mime="application/pdf",
+                                    )
+                                    try:
+                                        from pdf_to_excel import pdf_to_excel
+                                        _xlsx = pdf_to_excel(_pdf)
+                                        st.download_button(
+                                            f"⬇️ 下載 {_ono} 標籤.xlsx（縮至8格高）",
+                                            data=_xlsx,
+                                            file_name=f"標籤_{_ono}.xlsx",
+                                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                        )
+                                    except Exception as _xe:
+                                        st.warning(f"PDF 轉 Excel 失敗（仍可下載 PDF）：{_xe}")
+                                else:
+                                    _zb = pack_zip(_success)
+                                    st.download_button(
+                                        f"⬇️ 下載所有標籤 ({len(_success)} 筆).zip",
+                                        data=_zb,
+                                        file_name="ERP標籤.zip",
+                                        mime="application/zip",
+                                        use_container_width=True,
+                                    )
 
-                except ImportError as e:
-                    st.error(f"缺少套件：{e}")
-                    import traceback
-                    st.code(traceback.format_exc())
-                except Exception as e:
-                    st.error(f"ERP 下載失敗：{e}")
-                    import traceback
-                    st.code(traceback.format_exc())
+                            if _failed:
+                                st.warning(f"以下出貨單下載失敗：{', '.join(_failed)}")
+                                for _fn in _failed:
+                                    if _fn in _erp_errors:
+                                        st.code(f"[{_fn}] {_erp_errors[_fn]}")
+                            if not _success and not _failed:
+                                st.error("未取得任何 PDF，請確認帳密與網路連線")
+
+                        except ImportError as _ie:
+                            st.error(f"缺少套件：{_ie}")
+                        except Exception as _ee:
+                            import traceback as _etb
+                            st.error(f"ERP 下載失敗：{_ee}")
+                            st.code(_etb.format_exc())
 
 
 # ════════════════════════════════════════════════════════════════
@@ -635,32 +729,30 @@ with tab_invoice:
         selected_orders = [order_map[k] for k in selected_keys if order_map[k].get("items")]
 
         if selected_orders:
-            with st.expander("發票設定", expanded=True):
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    default_seller = next(
-                        (o.get("seller_tax_id","") for o in selected_orders if o.get("seller_tax_id")), ""
-                    )
-                    seller_id = st.text_input("賣方統編", value=default_seller)
-                with c2:
-                    inv_prefix = st.text_input("發票字軌（2碼英文）", value="AA", max_chars=2)
-                with c3:
-                    start_num = st.number_input("起始號碼", min_value=1, value=1)
+            _with_inv    = [o for o in selected_orders if o.get("invoice_no")]
+            _without_inv = [o for o in selected_orders if not o.get("invoice_no")]
 
-            st.write(f"共 {len(selected_orders)} 張發票")
-            if st.button("產出電子發票 Excel", type="primary", use_container_width=True):
-                buf = generate_invoice_excel(
-                    selected_orders,
-                    seller_tax_id=seller_id,
-                    invoice_prefix=inv_prefix,
-                    start_number=int(start_num),
-                )
-                st.download_button(
-                    "⬇️ 下載電子發票上傳檔.xlsx",
-                    data=buf,
-                    file_name="電子發票上傳.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                )
+            if _with_inv:
+                st.success(f"共 **{len(_with_inv)}** 張有發票號碼，將產出發票")
+            if _without_inv:
+                _no_inv_nos = [o.get("order_no","(未知)") for o in _without_inv]
+                st.warning(f"{len(_without_inv)} 張無發票號碼（略過）：{', '.join(_no_inv_nos)}")
+
+            st.caption("發票人統編：**24405403**　受票人統編：從銷貨單統一編號　單價：暫定 100（待確認）")
+
+            if _with_inv and st.button("產出電子發票 xls", type="primary", use_container_width=True):
+                try:
+                    buf = generate_invoice_excel(_with_inv)
+                    st.download_button(
+                        "⬇️ 下載電子發票上傳檔.xls",
+                        data=buf,
+                        file_name="電子發票上傳.xls",
+                        mime="application/vnd.ms-excel",
+                        use_container_width=True,
+                    )
+                except Exception as _inv_e:
+                    import traceback as _inv_tb
+                    st.error(f"產出失敗：{_inv_e}")
+                    st.code(_inv_tb.format_exc())
         else:
             st.warning("請選擇至少一張銷貨單")
