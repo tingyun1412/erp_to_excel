@@ -455,8 +455,7 @@ def generate_from_template(
         for ch in r':\/? *[]':
             ws_name = ws_name.replace(ch, "_")
         ws_out = wb_out.create_sheet(title=ws_name)
-        logo_imgs = _extract_logo_images(ws_tmpl) if ws_tmpl else []
-        _write_order_to_sheet(ws_out, ws_tmpl, template_info, [order], logo_imgs=logo_imgs)
+        _write_order_to_sheet(ws_out, ws_tmpl, template_info, [order], logo_imgs=[])
 
     if not wb_out.sheetnames:
         wb_out.create_sheet("出貨標籤")
@@ -497,8 +496,7 @@ def generate_labels_multiorder(
         for ch in r':\/? *[]':
             ws_name = ws_name.replace(ch, "_")
         ws_out = wb_out.create_sheet(title=ws_name)
-        logo_imgs = _extract_logo_images(ws_tmpl) if ws_tmpl else []
-        _write_order_to_sheet(ws_out, ws_tmpl, tinfo, [order], logo_imgs=logo_imgs)
+        _write_order_to_sheet(ws_out, ws_tmpl, tinfo, [order], logo_imgs=[])
 
     if not wb_out.sheetnames:
         wb_out.create_sheet("出貨標籤")
