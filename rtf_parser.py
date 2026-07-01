@@ -281,7 +281,7 @@ def _parse_items_by_position(rtf_bytes: bytes, ship_date: str, customer: str) ->
         return all(_is_header_noise(v) or v in _FOOTER_STOP for v in vals)
     shapes = [s for s in shapes if not _noise(s['vals'])]
 
-    Y_TOL = 30
+    Y_TOL = 60   # 增大容忍度：同列文字框 Y 座標可能差到 60 twips（~1mm）
     X_TOL = 30
 
     # 按 Y 分組
