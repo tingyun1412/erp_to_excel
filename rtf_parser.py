@@ -1,13 +1,14 @@
 """
 銷貨單 RTF 解析模組
 
-格式A（銷貨單1,3,4）：項次 → 品名(中文) → 規格 → 數量 → 料號 → 客戶料號/批號
-格式B（銷貨單2，規格在項次前）：規格 → 項次 → 數量 → 料號 → 客戶料號
+RTF 文件使用絕對定位文字框（\\shp），每個欄位是獨立的文字框。
+品項列固定欄位（按 X 座標排序）：
+  Col 0 = 序號  Col 1 = 本公司料號  Col 2 = 品名+規格(合一)
+  Col 3 = 數量  Col 4 = 單位(略)   Col 5+ = 備注/批號
 
 批號 vs 客戶料號分類規則（兩階段）：
-  - 若該品項段落含 12 位純數字批號 → R/P+數字視為客戶料號
-  - 若無 12 位純數字批號 → R/P+數字視為批號
-  - 遇到「以下空白」等頁尾標記後停止收集
+  - 若該品項含 12 位純數字批號 → R/P+數字視為客戶料號，12位=批號
+  - 若無 12 位純數字批號 → R/P+數字視為批號，其他料號=客戶料號
 """
 import re
 from pathlib import Path
@@ -203,6 +204,160 @@ def _clean_qty(v):
 
 
 # ══════════════════════════════════════════════════════════════════
+# 位置解析（Shape-based）
+# ══════════════════════════════════════════════════════════════════
+
+def _extract_shapes(text: str) -> list[dict]:
+    """從 RTF 提取所有 \\shp 定位文字框（排除 \\shprslt 副本）。"""
+    loch_pat = re.compile(r'\\loch\\f18 ([^\r\n\\}]+)')
+    hich_pat = re.compile(r"\\hich\\af1\\dbch\\f18 ((?:\\'[0-9a-fA-F]{2}[\r\n\s]*)+)")
+
+    def _vals(content: str) -> list[str]:
+        raw: list[tuple[int, str]] = []
+        for m in loch_pat.finditer(content):
+            v = m.group(1).strip()
+            if v and v not in (':', ' ', '  '):
+                raw.append((m.start(), v))
+        for m in hich_pat.finditer(content):
+            try:
+                hb = bytes(int(x, 16) for x in re.findall(r"'([0-9a-fA-F]{2})", m.group(1)))
+                decoded = hb.decode('cp950', errors='replace').strip()
+                if decoded:
+                    raw.append((m.start(), decoded))
+            except Exception:
+                pass
+        raw.sort(key=lambda x: x[0])
+        result, prev = [], None
+        for _, v in raw:
+            if v != prev:
+                result.append(v)
+                prev = v
+        return result
+
+    shp_pat = re.compile(
+        r'\\shp\{\\[*]\\shpinst\\shpleft(-?\d+)\\shptop(-?\d+)\\shpright(-?\d+)\\shpbottom(-?\d+)'
+        r'.*?\\shptxt\s*(.*?)\}}}',
+        re.DOTALL,
+    )
+    shapes = []
+    for m in shp_pat.finditer(text):
+        vals = _vals(m.group(5))
+        if vals:
+            shapes.append({
+                'pos':  m.start(),
+                'left': int(m.group(1)),
+                'top':  int(m.group(2)),
+                'vals': vals,
+            })
+    return shapes
+
+
+def _parse_items_by_position(rtf_bytes: bytes, ship_date: str, customer: str) -> list[dict]:
+    """
+    按文字框的 X 座標（shpleft）決定欄位，Y 座標（shptop）決定列。
+    同一 Y（±30 twips）的文字框組成一列；列內按 X 排序後：
+      Col 0 = 序號  Col 1 = 本公司料號  Col 2 = 品名+規格
+      Col 3 = 數量  Col 4 = 單位（短中文，略）  Col 5+ = 備注/批號
+    多頁文件同一相對 Y 有多個品項，按 RTF byte 順序區分頁次。
+    """
+    text = rtf_bytes.decode('cp950', errors='replace')
+    shapes = _extract_shapes(text)
+
+    # 過濾純噪音文字框（表頭標籤、頁尾標記、公司名等）
+    def _noise(vals: list[str]) -> bool:
+        return all(_is_header_noise(v) or v in _FOOTER_STOP for v in vals)
+    shapes = [s for s in shapes if not _noise(s['vals'])]
+
+    Y_TOL = 30
+    X_TOL = 30
+
+    # 按 Y 分組
+    y_buckets: dict[int, list[dict]] = {}
+    for s in shapes:
+        key = next((k for k in y_buckets if abs(k - s['top']) <= Y_TOL), None)
+        if key is None:
+            key = s['top']
+            y_buckets[key] = []
+        y_buckets[key].append(s)
+
+    items: list[dict] = []
+    seen_seqs: set[str] = set()
+
+    for top in sorted(y_buckets):
+        row_shapes = y_buckets[top]
+
+        # 按 X 分組，每格按 byte 順序排（=頁次順序）
+        x_buckets: dict[int, list[dict]] = {}
+        for s in row_shapes:
+            key = next((k for k in x_buckets if abs(k - s['left']) <= X_TOL), None)
+            if key is None:
+                key = s['left']
+                x_buckets[key] = []
+            x_buckets[key].append(s)
+        for k in x_buckets:
+            x_buckets[k].sort(key=lambda s: s['pos'])
+
+        # 找序號欄（最小 X 且包含序號值）
+        seq_x = next(
+            (x for x in sorted(x_buckets)
+             if any(_is_seq(v) for s in x_buckets[x] for v in s['vals'])),
+            None,
+        )
+        if seq_x is None:
+            continue
+
+        n_items = len(x_buckets[seq_x])          # 序號格有幾個 shape = 有幾頁品項
+        sorted_x = sorted(x for x in x_buckets)  # 欄位 X 座標由小到大
+
+        for item_idx in range(n_items):
+            def gcv(col_rank: int) -> list[str]:
+                if col_rank >= len(sorted_x):
+                    return []
+                bucket = x_buckets[sorted_x[col_rank]]
+                return bucket[item_idx]['vals'] if item_idx < len(bucket) else []
+
+            seq = next((v for v in gcv(0) if _is_seq(v)), None)
+            if not seq or seq in seen_seqs:
+                continue
+            seen_seqs.add(seq)
+
+            item = _blank_item(seq, ship_date, customer)
+
+            # Col 1: 本公司料號
+            item["item_no"] = gcv(1)[0] if gcv(1) else ""
+
+            # Col 2: 品名 + 規格（合一文字框）
+            # 連續中文（≥2字）合併成品名，其後為規格
+            ns = gcv(2)
+            name_parts: list[str] = []
+            desc_start = 0
+            for i, v in enumerate(ns):
+                if _is_chinese(v) and len(v) >= 2:
+                    name_parts.append(v)
+                    desc_start = i + 1
+                else:
+                    break
+            item["name"] = "".join(name_parts)
+            item["description"] = " ".join(ns[desc_start:]).strip()
+
+            # Col 3: 數量
+            qty_str = next((v for v in gcv(3) if _is_qty(v)), "")
+            item["quantity"] = _clean_qty(qty_str) if qty_str else 0
+
+            # Col 4+: 單位（短中文，跳過）→ 備注 / 批號
+            post_vals: list[str] = []
+            for ci in range(4, len(sorted_x)):
+                for v in gcv(ci):
+                    if _is_chinese(v) and len(v) <= 3:
+                        continue   # 單位（個/支/PCS等），略
+                    post_vals.append(v)
+
+            _classify_post_item(item, post_vals)
+            items.append(item)
+
+    items.sort(key=lambda x: x['seq'])
+    return items
+
 
 def parse_sales_order_rtf(file_path) -> dict:
     path = Path(file_path)
@@ -291,33 +446,7 @@ def parse_sales_order_rtf(file_path) -> dict:
                     _person_skip.add(_name)
                 break
 
-    item_vals = [v for v in values[header_end:]
-                 if not _is_header_noise(v) and v not in _person_skip]
-
-    # 格式B：第一個序號「之前」的規格值在 header_end 之前，需另外捕捉
-    pre_item_vals = [v for v in values[max(0, header_end - 30):header_end]
-                     if not _is_header_noise(v) and v not in _person_skip]
-
-    first_seq_pos = next((i for i, v in enumerate(item_vals) if _is_seq(v)), None)
-    format_b = (
-        first_seq_pos is not None
-        and first_seq_pos > 0
-        and any(_is_spec(v) for v in item_vals[:first_seq_pos])
-    )
-    # 格式C：項次 → 數量 → 單位 → 料號 → 客戶料號 → 品名 → 規格
-    # 判斷依據：項次後緊接著就是數量（格式A/B皆非如此）
-    format_c = False
-    if not format_b and first_seq_pos is not None:
-        nxt = item_vals[first_seq_pos + 1] if first_seq_pos + 1 < len(item_vals) else ""
-        format_c = _is_qty(nxt)
-
-    if format_b:
-        result["items"] = _parse_format_b(item_vals, result["order_date"], customer_from_filename,
-                                          pre_vals=pre_item_vals)
-    elif format_c:
-        result["items"] = _parse_format_c(item_vals, result["order_date"], customer_from_filename)
-    else:
-        result["items"] = _parse_format_a(item_vals, result["order_date"], customer_from_filename)
+    result["items"] = _parse_items_by_position(raw, result["order_date"], customer_from_filename)
 
     return result
 
