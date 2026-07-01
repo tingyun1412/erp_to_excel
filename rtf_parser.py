@@ -363,12 +363,14 @@ def _parse_items_by_position(rtf_bytes: bytes, ship_date: str, customer: str) ->
             item["name"] = "".join(name_parts)
             item["description"] = " ".join(desc_vals).strip()
 
-            # Col 3: 數量
+            # Col 3: 數量（非數量格式的值可能是規格延伸，加入後置處理）
             qty_str = next((v for v in gcv(3) if _is_qty(v)), "")
             item["quantity"] = _clean_qty(qty_str) if qty_str else 0
 
             # Col 4+: 單位（短中文，跳過）→ 備注 / 批號
             post_vals: list[str] = []
+            # Col 3 中非數量的值（如 *100um*12mm 位置偏移落入此欄）→ 補入後置
+            post_vals.extend(v for v in gcv(3) if not _is_qty(v))
             for ci in range(4, len(sorted_x)):
                 for v in gcv(ci):
                     if _is_chinese(v) and len(v) <= 3:

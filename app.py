@@ -104,6 +104,19 @@ tab_label, tab_invoice = st.tabs([
 with tab_label:
     st.subheader("出貨標籤")
 
+    # 頁面一開啟就從 Google Drive 補載所有有 ID 的模板 Excel（不需等有訂單才跑）
+    try:
+        _all_tpls_preload = load_templates()
+        for _tr in _all_tpls_preload:
+            _tk = f"{_tr['廠商名稱']}_{_tr['模板名稱']}"
+            if _tk not in st.session_state.template_wb_bytes and _tr.get("Excel檔案ID"):
+                try:
+                    st.session_state.template_wb_bytes[_tk] = download_template_excel(_tr["Excel檔案ID"])
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
     sub_tab_use, sub_tab_manage, sub_tab_erp = st.tabs(["產出標籤", "管理模板", "從廠商網站下載標籤"])
 
     # ── 產出標籤 ──────────────────────────────────────────────
@@ -118,15 +131,6 @@ with tab_label:
             except Exception as e:
                 st.error(f"載入模板失敗：{e}")
                 all_templates = []
-
-            # 自動從 Google Drive 補載尚未在 session 的模板 Excel
-            for _tr in (all_templates or []):
-                _tk = f"{_tr['廠商名稱']}_{_tr['模板名稱']}"
-                if _tk not in st.session_state.template_wb_bytes and _tr.get("Excel檔案ID"):
-                    try:
-                        st.session_state.template_wb_bytes[_tk] = download_template_excel(_tr["Excel檔案ID"])
-                    except Exception:
-                        pass
 
             if not all_templates:
                 st.warning("尚無任何標籤模板，請先到「管理模板」上傳")

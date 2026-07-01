@@ -545,8 +545,16 @@ def _extract_logo_images(ws_src) -> list[dict]:
                     rel_row    = anchor._from.row
                     col_letter = get_column_letter(anchor._from.col + 1)
             elif hasattr(anchor, '_from') and hasattr(anchor, 'to'):
-                # TwoCellAnchor 通常是背景圖/浮水印，全部跳過
-                continue
+                # TwoCellAnchor：跨超過 3 列 → 背景/浮水印，跳過；其他視為 logo
+                span_rows = anchor.to.row - anchor._from.row
+                if span_rows > 3:
+                    continue
+                rel_row = anchor._from.row
+                col_letter = get_column_letter(anchor._from.col + 1)
+                if img.width and img.height:
+                    w_px, h_px = img.width, img.height
+                else:
+                    continue
             elif isinstance(anchor, str):
                 m = re.match(r'^([A-Za-z]+)(\d+)$', anchor.strip())
                 if m:
