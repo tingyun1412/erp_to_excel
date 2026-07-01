@@ -311,13 +311,16 @@ def parse_sales_order_rtf(file_path) -> dict:
         nxt = item_vals[first_seq_pos + 1] if first_seq_pos + 1 < len(item_vals) else ""
         format_c = _is_qty(nxt)
 
+    seq_cell_parts = _extract_seq_cell_parts(raw)
+
     if format_b:
         result["items"] = _parse_format_b(item_vals, result["order_date"], customer_from_filename,
                                           pre_vals=pre_item_vals)
     elif format_c:
         result["items"] = _parse_format_c(item_vals, result["order_date"], customer_from_filename)
     else:
-        result["items"] = _parse_format_a(item_vals, result["order_date"], customer_from_filename)
+        result["items"] = _parse_format_a(item_vals, result["order_date"], customer_from_filename,
+                                          seq_cell_parts=seq_cell_parts)
 
     return result
 
@@ -337,6 +340,49 @@ def _blank_item(seq, ship_date, customer):
         "ship_date":   ship_date,
         "customer":    customer,
     }
+
+
+def _extract_seq_cell_parts(rtf_bytes: bytes) -> set:
+    """
+    找出「和序號同在一個 \\cell 內」的料號。
+    格式1銷貨單的序號欄會把客戶端參考號（如 LSCR-169-184-S）印在序號旁，
+    這類料號應被分類為 remark，不可誤判為本公司料號。
+    """
+    text = rtf_bytes.decode("cp950", errors="replace")
+    result: set = set()
+
+    hich_re = re.compile(r"\\hich\\af1\\dbch\\f18 ((?:\\'[0-9a-fA-F]{2}[\r\n\s]*)+)")
+
+    for m in re.finditer(r'\\trowd\b', text):
+        end_m = re.search(r'\\row\b', text[m.start():])
+        if not end_m:
+            continue
+        row_text = text[m.start(): m.start() + end_m.end()]
+
+        # 只看第一格（第一個 \cell 之前）
+        fc_m = re.search(r'\\cell\b', row_text)
+        first_cell = row_text[:fc_m.start()] if fc_m else row_text
+
+        cell_vals: list[str] = []
+        for lm in re.finditer(r"\\loch\\f18 ([^\r\n\\}]+)", first_cell):
+            v = lm.group(1).strip()
+            if v and v not in (":", " ", "  "):
+                cell_vals.append(v)
+        for hm in hich_re.finditer(first_cell):
+            try:
+                hb = bytes(int(x, 16) for x in re.findall(r"'([0-9a-fA-F]{2})", hm.group(1)))
+                decoded = hb.decode("cp950", errors="replace").strip()
+                if decoded:
+                    cell_vals.append(decoded)
+            except Exception:
+                pass
+
+        if any(re.match(r'^0[0-9]{3}$', v) for v in cell_vals):
+            for v in cell_vals:
+                if _is_part_no(v) and not re.match(r'^0[0-9]{3}$', v):
+                    result.add(v)
+
+    return result
 
 
 def _classify_post_item(item: dict, post_vals: list):
@@ -363,8 +409,9 @@ def _classify_post_item(item: dict, post_vals: list):
                 item["remark"] = v
 
 
-def _parse_format_a(vals, ship_date, customer):
+def _parse_format_a(vals, ship_date, customer, seq_cell_parts=None):
     """格式A：項次 → 品名(中文) → 規格 → 數量 → 料號 → 客戶料號/批號"""
+    seq_cell_parts = seq_cell_parts or set()
     seq_positions = [i for i, v in enumerate(vals) if _is_seq(v)]
     items = []
 
@@ -402,8 +449,12 @@ def _parse_format_a(vals, ship_date, customer):
                     # 單字中文（如「度」）不加入任何欄位
                 elif _is_part_no(v) and not _is_spec(v):
                     _building_name = False
-                    item["item_no"] = v
-                    state = "got_item_no"
+                    if v in seq_cell_parts:
+                        # 此料號與序號同格（客戶端參考號），歸入 remark，不搶 item_no
+                        post_vals.append(v)
+                    else:
+                        item["item_no"] = v
+                        state = "got_item_no"
                 else:
                     _building_name = False
                     if v not in desc_seen:
@@ -414,8 +465,11 @@ def _parse_format_a(vals, ship_date, customer):
                 if _is_chinese(v):
                     pass  # 品名應在 spec 階段已設定
                 elif _is_part_no(v):
-                    item["item_no"] = v
-                    state = "got_item_no"
+                    if v in seq_cell_parts:
+                        post_vals.append(v)
+                    else:
+                        item["item_no"] = v
+                        state = "got_item_no"
 
             elif state == "got_item_no":
                 if v in _FOOTER_STOP:
