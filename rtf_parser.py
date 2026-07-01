@@ -304,10 +304,6 @@ def parse_sales_order_rtf(file_path) -> dict:
         and first_seq_pos > 0
         and any(_is_spec(v) for v in item_vals[:first_seq_pos])
     )
-    # 格式B判斷：若 item_vals 前段沒有規格，也從 pre_item_vals 中找
-    if not format_b and first_seq_pos == 0 and any(_is_spec(v) for v in pre_item_vals):
-        format_b = True
-
     # 格式C：項次 → 數量 → 單位 → 料號 → 客戶料號 → 品名 → 規格
     # 判斷依據：項次後緊接著就是數量（格式A/B皆非如此）
     format_c = False
