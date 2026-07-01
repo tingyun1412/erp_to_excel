@@ -240,7 +240,7 @@ def analyze_template(wb: openpyxl.Workbook, sheet_name: str) -> dict:
             field = _guess_field(val)
             if field.endswith("_inline"):
                 # 只存前綴（"料號："），丟掉範本的樣品值（"BLSS400170122SA"）
-                m = re.match(r'^(.*?[：:]\s*)', val)
+                m = re.match(r'^(.*?[：:])[ \t]*', val)
                 display_val = m.group(1) if m else val
             else:
                 display_val = val
@@ -339,7 +339,7 @@ def _fill_value(cell_info: dict, item: dict, order: dict, seq: int) -> str | Non
         new_val = _get_value(item, order, base_field, seq)
         # 從 label 中只取前綴（到第一個 ：或 : 為止），
         # 這樣即使 label 是「料號：BLSS400170122SA」也不會重複帶入範本值
-        m = re.match(r'^(.*?[：:]\s*)', label)
+        m = re.match(r'^(.*?[：:])[ \t]*', label)
         prefix = m.group(1) if m else (label.rstrip("：: ") + "：")
         return prefix + (new_val or "")
     else:
