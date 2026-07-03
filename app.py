@@ -248,6 +248,9 @@ with tab_label:
                         if _dbg_shapes:
                             with st.expander(f"🔍 Shape 除錯 — {_dbg_order.get('order_no',_dbg_order.get('filename',''))}"):
                                 import pandas as _pd
+                                st.markdown("**全部 raw_values（含非 shape 的文字）：**")
+                                st.write(_dbg_order.get("raw_values", []))
+                                st.markdown("**Shape 文字框位置：**")
                                 _df = _pd.DataFrame([
                                     {"left": s["left"], "top": s["top"], "vals": " | ".join(s["vals"])}
                                     for s in sorted(_dbg_shapes, key=lambda x: (x["top"], x["left"]))
