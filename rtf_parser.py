@@ -818,6 +818,13 @@ def _parse_format_c(vals, ship_date, customer):
     return items
 
 
+def debug_shapes(file_path) -> list[dict]:
+    """回傳所有 shp 文字框的 left/top/vals，供除錯用。"""
+    text = Path(file_path).read_bytes().decode('cp950', errors='replace')
+    shapes = _extract_shapes(text)
+    return [{'left': s['left'], 'top': s['top'], 'vals': s['vals']} for s in shapes]
+
+
 def parse_multiple_rtf(file_list) -> list[dict]:
     results = []
     for f in file_list:

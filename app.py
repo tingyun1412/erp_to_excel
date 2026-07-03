@@ -22,7 +22,7 @@ if not chrome_dir.exists():
         [sys.executable, "-m", "playwright", "install", "chromium"],
         check=True
     )
-from rtf_parser import parse_sales_order_rtf
+from rtf_parser import parse_sales_order_rtf, debug_shapes
 from module_b_invoice import generate_invoice_excel
 from template_engine import (
     analyze_template, analyze_all_sheets,
@@ -69,6 +69,7 @@ with st.sidebar:
                     try:
                         data = parse_sales_order_rtf(tmp_path)
                         data["filename"] = uf.name
+                        data["_debug_shapes"] = debug_shapes(tmp_path)
                         orders.append(data)
                     except Exception as e:
                         errors.append(f"{uf.name}: {e}")
@@ -241,6 +242,17 @@ with tab_label:
                         },
                     )
                     st.caption(f"共 {len(selected_items)} 個品項，每張銷貨單一個工作表")
+                    # ── 除錯：顯示 shape 位置 ──────────────────────────
+                    for _dbg_order in selected_orders:
+                        _dbg_shapes = _dbg_order.get("_debug_shapes", [])
+                        if _dbg_shapes:
+                            with st.expander(f"🔍 Shape 除錯 — {_dbg_order.get('order_no',_dbg_order.get('filename',''))}"):
+                                import pandas as _pd
+                                _df = _pd.DataFrame([
+                                    {"left": s["left"], "top": s["top"], "vals": " | ".join(s["vals"])}
+                                    for s in sorted(_dbg_shapes, key=lambda x: (x["top"], x["left"]))
+                                ])
+                                st.dataframe(_df, use_container_width=True, hide_index=True, height=400)
                 else:
                     st.warning("請選擇至少一張銷貨單")
 
