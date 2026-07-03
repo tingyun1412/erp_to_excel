@@ -298,10 +298,9 @@ def _parse_items_by_position(rtf_bytes: bytes, ship_date: str, customer: str) ->
     col_x      = _find_col_x_from_header(shapes)
     name_col_x = col_x.get('name')
     qty_col_x  = col_x.get('qty')
-    BAND       = 150   # twips，欄位邊界容忍（~2.6mm）
-
+    ALIGN_TOL  = 80    # twips，欄位邊界容忍（~1.4mm）
     use_header = (name_col_x is not None and qty_col_x is not None
-                  and qty_col_x > name_col_x + BAND * 2)
+                  and qty_col_x > name_col_x + ALIGN_TOL * 2)
 
     # ── 過濾純噪音文字框 ─────────────────────────────────────────────
     def _noise(vals: list[str]) -> bool:
@@ -333,31 +332,29 @@ def _parse_items_by_position(rtf_bytes: bytes, ship_date: str, customer: str) ->
         if not seq_shapes:
             continue
 
-        n_items = len(seq_shapes)
+        n_items    = len(seq_shapes)
+        seq_left_x = min(s['left'] for s in seq_shapes)
 
         if use_header:
-            # 每頁的 byte 位置上界（用相鄰序號 shape 的 pos 分界）
+            # 每頁的 byte 位置上界
             page_ends = [
                 seq_shapes[i + 1]['pos'] if i + 1 < n_items else float('inf')
                 for i in range(n_items)
             ]
 
             def _page_shapes(band: list[dict], pg: int) -> list[dict]:
-                """回傳 band 中屬於第 pg 頁的 shapes，依 X 排序。"""
                 e_pos = page_ends[pg]
                 s_pos = seq_shapes[pg]['pos']
-                # pg=0 也收比第一個 seq 稍早的 shapes（RTF 可能先寫其他欄）
                 sel = [s for s in band
                        if (pg == 0 and s['pos'] < e_pos)
                        or (pg > 0 and s_pos <= s['pos'] < e_pos)]
                 return sorted(sel, key=lambda s: s['left'])
 
-            # 預先切各欄 band（依標題 X 座標）
-            ns_band   = [s for s in row_shapes
-                         if name_col_x - BAND <= s['left'] < qty_col_x - BAND]
-            qty_band  = [s for s in row_shapes
-                         if qty_col_x - BAND <= s['left'] <= qty_col_x + BAND]
-            post_band = [s for s in row_shapes if s['left'] > qty_col_x + BAND]
+            # seq 到 qty 之間（含 qty ± ALIGN_TOL）→ 料號 + 品名 + 規格 + 數量
+            pre_post_band = [s for s in row_shapes
+                             if seq_left_x < s['left'] <= qty_col_x + ALIGN_TOL]
+            # qty 之後 → 單位 / 備注 / 批號
+            post_band = [s for s in row_shapes if s['left'] > qty_col_x + ALIGN_TOL]
 
         else:
             # Fallback：X bucket rank（原方法）
@@ -382,25 +379,39 @@ def _parse_items_by_position(rtf_bytes: bytes, ship_date: str, customer: str) ->
             item = _blank_item(seq, ship_date, customer)
 
             if use_header:
-                # 本公司料號：X 在 seq 和 品名欄 之間
-                seq_left = seq_shapes[item_idx]['left']
-                ino_band = [s for s in row_shapes
-                            if seq_left < s['left'] < name_col_x - BAND]
-                ino_pg = _page_shapes(ino_band, item_idx)
-                item['item_no'] = ino_pg[0]['vals'][0] if ino_pg and ino_pg[0]['vals'] else ''
+                pre_post_pg = _page_shapes(pre_post_band, item_idx)
+                post_pg     = _page_shapes(post_band, item_idx)
 
-                # 品名 + 規格：name_col_x ~ qty_col_x 之間的所有文字框
-                ns_pg = _page_shapes(ns_band, item_idx)
-                ns    = [v for s in ns_pg for v in s['vals']]
+                ns:        list[str] = []
+                post_vals: list[str] = []
+                item_no_found = False
+                qty_found     = False
 
-                # 數量：qty_col_x ± BAND
-                qty_pg   = _page_shapes(qty_band, item_idx)
-                qty_vals = [v for s in qty_pg for v in s['vals']]
+                # 依 X 由左到右掃：第一個料號值 → item_no；數量值 → qty；其餘 → ns
+                for s in pre_post_pg:   # _page_shapes 已按 left 排序
+                    for v in s['vals']:
+                        if not item_no_found and _is_part_no(v) and not _is_spec(v):
+                            item['item_no'] = v
+                            item_no_found = True
+                        elif _is_qty(v) and not qty_found:
+                            item['quantity'] = _clean_qty(v)
+                            qty_found = True
+                        elif not (_is_chinese(v) and len(v) <= 3):
+                            ns.append(v)
 
-                # 後置（單位/備注/批號）：qty_col_x 之後
-                post_pg   = _page_shapes(post_band, item_idx)
-                post_vals = [v for s in post_pg for v in s['vals']
-                             if not (_is_chinese(v) and len(v) <= 3)]
+                # 後置欄位：批號 / 備注 / 單位（短中文跳過）
+                for s in post_pg:
+                    for v in s['vals']:
+                        if _is_chinese(v) and len(v) <= 3:
+                            continue
+                        post_vals.append(v)
+
+                _classify_post_item(item, post_vals)
+
+                # 後置中不是批號/料號的值（如規格溢位）→ 補入規格
+                for v in post_vals:
+                    if not _is_12digit_lot(v) and not _is_rp_lot(v) and not _is_part_no(v):
+                        ns.append(v)
 
             else:
                 def gcv(col_rank: int, _ii: int = item_idx) -> list[str]:
@@ -418,6 +429,9 @@ def _parse_items_by_position(rtf_bytes: bytes, ship_date: str, customer: str) ->
                         if _is_chinese(v) and len(v) <= 3:
                             continue
                         post_vals.append(v)
+                _classify_post_item(item, post_vals)
+                item['quantity'] = _clean_qty(next((v for v in qty_vals if _is_qty(v)), '')) \
+                    if any(_is_qty(v) for v in qty_vals) else 0
 
             # ── 品名 vs 規格分割 ─────────────────────────────────────
             name_parts: list[str] = []
@@ -438,13 +452,6 @@ def _parse_items_by_position(rtf_bytes: bytes, ship_date: str, customer: str) ->
                     desc_vals.append(v)
             item['name']        = ''.join(name_parts)
             item['description'] = ' '.join(desc_vals).strip()
-
-            # ── 數量 ─────────────────────────────────────────────────
-            qty_str = next((v for v in qty_vals if _is_qty(v)), '')
-            item['quantity'] = _clean_qty(qty_str) if qty_str else 0
-
-            # ── 後置分類（批號/備注）─────────────────────────────────
-            _classify_post_item(item, post_vals)
 
             items.append(item)
 
