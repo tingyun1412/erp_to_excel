@@ -335,30 +335,34 @@ def _parse_items_by_position(rtf_bytes: bytes, ship_date: str, customer: str) ->
         n_items    = len(seq_shapes)
         seq_left_x = min(s['left'] for s in seq_shapes)
 
+        X_TOL = 30
+
         if use_header:
-            # 每頁的 byte 位置上界
-            page_ends = [
-                seq_shapes[i + 1]['pos'] if i + 1 < n_items else float('inf')
-                for i in range(n_items)
-            ]
-
-            def _page_shapes(band: list[dict], pg: int) -> list[dict]:
-                e_pos = page_ends[pg]
-                s_pos = seq_shapes[pg]['pos']
-                sel = [s for s in band
-                       if (pg == 0 and s['pos'] < e_pos)
-                       or (pg > 0 and s_pos <= s['pos'] < e_pos)]
-                return sorted(sel, key=lambda s: s['left'])
-
             # seq 到 qty 之間（含 qty ± ALIGN_TOL）→ 料號 + 品名 + 規格 + 數量
             pre_post_band = [s for s in row_shapes
                              if seq_left_x < s['left'] <= qty_col_x + ALIGN_TOL]
             # qty 之後 → 單位 / 備注 / 批號
             post_band = [s for s in row_shapes if s['left'] > qty_col_x + ALIGN_TOL]
 
+            # X 子桶：同 X 欄位的多頁 shapes 按 byte 位置排序（= 頁次順序）
+            # 這樣多頁文件中，第 N 個 shape = 第 N 頁的值，不依賴 seq 的 byte 位置
+            def _make_sub_buckets(band: list[dict]) -> dict[int, list[dict]]:
+                bkts: dict[int, list[dict]] = {}
+                for s in band:
+                    key = next((k for k in bkts if abs(k - s['left']) <= X_TOL), None)
+                    if key is None:
+                        key = s['left']
+                        bkts[key] = []
+                    bkts[key].append(s)
+                for k in bkts:
+                    bkts[k].sort(key=lambda s: s['pos'])
+                return bkts
+
+            pre_post_sub = _make_sub_buckets(pre_post_band)
+            post_sub     = _make_sub_buckets(post_band)
+
         else:
             # Fallback：X bucket rank（原方法）
-            X_TOL = 30
             x_buckets: dict[int, list[dict]] = {}
             for s in row_shapes:
                 key = next((k for k in x_buckets if abs(k - s['left']) <= X_TOL), None)
@@ -379,18 +383,18 @@ def _parse_items_by_position(rtf_bytes: bytes, ship_date: str, customer: str) ->
             item = _blank_item(seq, ship_date, customer)
 
             if use_header:
-                pre_post_pg = _page_shapes(pre_post_band, item_idx)
-                post_pg     = _page_shapes(post_band, item_idx)
-
                 ns:        list[str] = []
                 post_vals: list[str] = []
                 item_no_found = False
                 qty_found     = False
 
-                # 依 X 由左到右掃：第一個料號值 → item_no；數量值 → qty；其餘 → ns
-                # 注意：這裡不過濾短 CJK（避免品名片段如「電木」「度」被誤刪）
-                for s in pre_post_pg:   # _page_shapes 已按 left 排序
-                    for v in s['vals']:
+                # X 子桶由左到右，每桶取第 item_idx 個 shape（= 第 item_idx 頁）
+                # 不依賴 seq 的 byte 位置，解決第二頁 shapes 可能排在 seq 前面的問題
+                for x_key in sorted(pre_post_sub):
+                    bucket = pre_post_sub[x_key]
+                    if item_idx >= len(bucket):
+                        continue
+                    for v in bucket[item_idx]['vals']:
                         if not item_no_found and _is_part_no(v) and not _is_spec(v):
                             item['item_no'] = v
                             item_no_found = True
@@ -401,8 +405,11 @@ def _parse_items_by_position(rtf_bytes: bytes, ship_date: str, customer: str) ->
                             ns.append(v)
 
                 # 後置欄位：批號 / 備注 / 單位（短中文跳過）
-                for s in post_pg:
-                    for v in s['vals']:
+                for x_key in sorted(post_sub):
+                    bucket = post_sub[x_key]
+                    if item_idx >= len(bucket):
+                        continue
+                    for v in bucket[item_idx]['vals']:
                         if _is_chinese(v) and len(v) <= 3:
                             continue
                         post_vals.append(v)
