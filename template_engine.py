@@ -204,11 +204,6 @@ def analyze_template(wb: openpyxl.Workbook, sheet_name: str) -> dict:
     gap_cols = len([c for c in separator_cols if c < max(first_unit_cols[-1], 2)]) if units_per_row > 1 else 1
 
     # 偵測 unit_rows 和橫向模式
-    first_col_vals = [
-        str(ws.cell(row=r, column=first_unit_cols[0]).value or "")
-        for r in range(1, max_row + 1)
-    ]
-
     header_rows = 0
     is_row_repeat_mode = False
     if not is_formula_mode and max_row >= 3:
@@ -221,7 +216,7 @@ def analyze_template(wb: openpyxl.Workbook, sheet_name: str) -> dict:
             unit_rows = 1
 
     if not is_row_repeat_mode:
-        unit_rows = _detect_unit_rows(first_col_vals)
+        unit_rows = max_row  # 用整張 sheet 高度當一個標籤單元，避免 _detect_unit_rows 誤判
 
     # 擷取格子資訊
     cells_info = []
@@ -281,17 +276,19 @@ def analyze_template(wb: openpyxl.Workbook, sheet_name: str) -> dict:
         row_heights[str(row_idx)] = float(h or 15)
 
     return {
-        "sheet_name":         sheet_name,
-        "unit_rows":          unit_rows,
-        "header_rows":        header_rows,
-        "is_row_repeat_mode": is_row_repeat_mode,
-        "is_formula_mode":    is_formula_mode,
-        "columns_per_unit":   columns_per_unit,
-        "gap_cols":           max(gap_cols, 1),
-        "units_per_row":      units_per_row,
-        "cells":              cells_info,
-        "col_widths":         col_widths,
-        "row_heights":        row_heights,
+        "sheet_name":           sheet_name,
+        "unit_rows":            unit_rows,
+        "header_rows":          header_rows,
+        "is_row_repeat_mode":   is_row_repeat_mode,
+        "is_formula_mode":      is_formula_mode,
+        "is_passthrough":       True,
+        "first_unit_start_col": first_unit_cols[0] if first_unit_cols else 1,
+        "columns_per_unit":     columns_per_unit,
+        "gap_cols":             max(gap_cols, 1),
+        "units_per_row":        units_per_row,
+        "cells":                cells_info,
+        "col_widths":           col_widths,
+        "row_heights":          row_heights,
     }
 
 
@@ -346,6 +343,94 @@ def _fill_value(cell_info: dict, item: dict, order: dict, seq: int) -> str | Non
         return _get_value(item, order, field, seq)
 
 
+def _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info: dict, orders: list[dict], logo_imgs: list = None):
+    """
+    Passthrough 模式：直接複製 template 的格子（保留格式），再覆寫動態欄位。
+    """
+    unit_rows            = template_info["unit_rows"]
+    columns_per_unit     = template_info["columns_per_unit"]
+    units_per_row        = template_info.get("units_per_row", 1)
+    gap_cols             = template_info.get("gap_cols", 1)
+    cells_info           = template_info["cells"]
+    row_heights          = template_info.get("row_heights", {})
+    first_unit_start_col = template_info.get("first_unit_start_col", 1)
+
+    data_cells = [c for c in cells_info
+                  if not c.get("is_header") and c.get("field", "__fixed__") != "__fixed__"]
+
+    # 欄寬：從 template 直接讀
+    for c_off in range(columns_per_unit):
+        tmpl_letter = get_column_letter(first_unit_start_col + c_off)
+        width = ws_tmpl.column_dimensions[tmpl_letter].width \
+                if tmpl_letter in ws_tmpl.column_dimensions else 10
+        for ui in range(units_per_row):
+            out_col = ui * (columns_per_unit + gap_cols) + c_off + 1
+            ws_out.column_dimensions[get_column_letter(out_col)].width = width
+
+    # 預計算 template 中在標籤範圍內的合併格
+    unit_merges = [
+        m for m in ws_tmpl.merged_cells.ranges
+        if (1 <= m.min_row <= unit_rows and 1 <= m.max_row <= unit_rows and
+            first_unit_start_col <= m.min_col < first_unit_start_col + columns_per_unit)
+    ]
+
+    all_items = [(item, order) for order in orders for item in order.get("items", [])]
+    current_row = 1
+    seq = 1
+
+    for item, order in all_items:
+        # 行高
+        for ri_str, h in row_heights.items():
+            ws_out.row_dimensions[current_row + int(ri_str) - 1].height = h
+
+        for ui in range(units_per_row):
+            base_col = ui * (columns_per_unit + gap_cols)
+
+            # 1. 複製 template 所有格子（保留值 + 樣式）
+            for r in range(1, unit_rows + 1):
+                for c_off in range(columns_per_unit):
+                    src = ws_tmpl.cell(row=r, column=first_unit_start_col + c_off)
+                    dst = ws_out.cell(row=current_row + r - 1, column=base_col + c_off + 1)
+                    if src.value is not None:
+                        dst.value = src.value
+                    try:
+                        if src.font:
+                            dst.font = copy.copy(src.font)
+                        if src.fill and getattr(src.fill, 'fill_type', None) not in (None, 'none'):
+                            dst.fill = copy.copy(src.fill)
+                        if src.border:
+                            dst.border = copy.copy(src.border)
+                        if src.alignment:
+                            dst.alignment = copy.copy(src.alignment)
+                    except Exception:
+                        pass
+
+            # 2. 套用合併格
+            for m in unit_merges:
+                try:
+                    ws_out.merge_cells(
+                        start_row=current_row + m.min_row - 1,
+                        start_column=base_col + m.min_col - first_unit_start_col + 1,
+                        end_row=current_row + m.max_row - 1,
+                        end_column=base_col + m.max_col - first_unit_start_col + 1,
+                    )
+                except Exception:
+                    pass
+
+            # 3. 覆寫動態格（用實際品項資料）
+            for dc in data_cells:
+                val = _fill_value(dc, item, order, seq)
+                if val is not None:
+                    ws_out.cell(row=current_row + dc["row"] - 1,
+                                column=base_col + dc["col"]).value = val
+
+        if logo_imgs:
+            _place_label_images(ws_out, logo_imgs, current_row, ws_tmpl)
+
+        current_row += unit_rows + 1
+        seq += 1
+
+
 def _write_order_to_sheet(
     ws_out,
     ws_tmpl,
@@ -354,9 +439,13 @@ def _write_order_to_sheet(
     logo_imgs: list = None,
 ):
     """Put all items from `orders` into `ws_out` using `template_info`."""
-    unit_rows        = template_info["unit_rows"]
-    header_rows      = template_info.get("header_rows", 0)
     is_row_repeat    = template_info.get("is_row_repeat_mode", False)
+
+    if template_info.get("is_passthrough") and ws_tmpl and not is_row_repeat:
+        _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info, orders, logo_imgs)
+        return
+
+    unit_rows        = template_info["unit_rows"]
     columns_per_unit = template_info["columns_per_unit"]
     gap_cols         = template_info.get("gap_cols", 1)
     units_per_row    = template_info.get("units_per_row", 2)
@@ -640,7 +729,8 @@ def _copy_style(ws_tmpl, row: int, col: int, dst_cell):
 
 def template_to_json(info: dict) -> str:
     keys = ["sheet_name","unit_rows","header_rows","is_row_repeat_mode",
-            "is_formula_mode","columns_per_unit","gap_cols","units_per_row",
+            "is_formula_mode","is_passthrough","first_unit_start_col",
+            "columns_per_unit","gap_cols","units_per_row",
             "cells","col_widths","row_heights"]
     return json.dumps({k: info[k] for k in keys if k in info}, ensure_ascii=False)
 

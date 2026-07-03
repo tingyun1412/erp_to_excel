@@ -5,10 +5,12 @@
   B - 標籤模板管理（上傳舊標籤 → 設定欄位 → 產出新標籤）
 """
 import json
+import math
 import re
 import tempfile
 from io import BytesIO
 
+import pandas as pd
 import streamlit as st
 import openpyxl
 import subprocess
@@ -241,7 +243,47 @@ with tab_label:
                         },
                     )
                     st.caption(f"共 {len(selected_items)} 個品項，每張銷貨單一個工作表")
+
+                    # ── 分裝設定 ─────────────────────────────────────────
+                    with st.expander("📦 分裝設定"):
+                        _pkg_enable = st.checkbox("啟用分裝", key="pkg_enable")
+                        if _pkg_enable:
+                            _pc1, _pc2 = st.columns(2)
+                            with _pc1:
+                                _pkg_small = st.checkbox("小標籤（每箱數量）", value=True, key="pkg_small")
+                            with _pc2:
+                                _pkg_large = st.checkbox("大標籤（總量）", value=True, key="pkg_large")
+
+                            _pkg_df = pd.DataFrame([
+                                {
+                                    "料號":   itm.get("item_no", ""),
+                                    "品名":   itm.get("name", ""),
+                                    "總數量": int(float(itm.get("quantity") or 0)),
+                                    "每箱數量": int(float(itm.get("quantity") or 1)),
+                                }
+                                for itm, _ in selected_items
+                            ])
+                            _pkg_edited = st.data_editor(
+                                _pkg_df,
+                                column_config={
+                                    "料號":   st.column_config.TextColumn(disabled=True, width="medium"),
+                                    "品名":   st.column_config.TextColumn(disabled=True, width="small"),
+                                    "總數量": st.column_config.NumberColumn(disabled=True, width="small"),
+                                    "每箱數量": st.column_config.NumberColumn(min_value=1, width="small"),
+                                },
+                                hide_index=True,
+                                use_container_width=True,
+                                key="pkg_table",
+                            )
+                            _pkg_sizes = dict(zip(_pkg_edited["料號"], _pkg_edited["每箱數量"]))
+                        else:
+                            _pkg_small = _pkg_large = True
+                            _pkg_sizes = {}
+
                 else:
+                    _pkg_enable = False
+                    _pkg_small = _pkg_large = True
+                    _pkg_sizes = {}
                     st.warning("請選擇至少一張銷貨單")
 
                 # 警告：模板無動態欄位 → 標籤只有固定文字
@@ -260,8 +302,35 @@ with tab_label:
                 if selected_orders and order_tmpl_map and st.button("產出標籤 Excel", type="primary", use_container_width=True):
                     with st.spinner("產出中..."):
                         try:
+                            # 套用分裝：展開品項
+                            def _expand_orders(orders, pkg_sizes, use_small, use_large):
+                                result = []
+                                for o in orders:
+                                    new_o = dict(o)
+                                    new_items = []
+                                    for itm in o.get("items", []):
+                                        total = float(itm.get("quantity") or 0)
+                                        pkg = float(pkg_sizes.get(itm.get("item_no", ""), total) or total)
+                                        n = max(1, math.ceil(total / pkg)) if pkg else 1
+                                        if use_small and pkg < total:
+                                            for _ in range(n):
+                                                s = dict(itm)
+                                                s["quantity"] = int(pkg)
+                                                new_items.append(s)
+                                        if use_large or (not use_small) or pkg >= total:
+                                            new_items.append(dict(itm))
+                                    new_o["items"] = new_items
+                                    result.append(new_o)
+                                return result
+
+                            _gen_orders = (
+                                _expand_orders(selected_orders, _pkg_sizes, _pkg_small, _pkg_large)
+                                if _pkg_enable and _pkg_sizes
+                                else selected_orders
+                            )
+
                             pairs = []
-                            for o in selected_orders:
+                            for o in _gen_orders:
                                 order_key = o.get("order_no", o.get("filename", ""))
                                 rec = order_tmpl_map.get(order_key, all_templates[0])
                                 tmpl_key = f"{rec['廠商名稱']}_{rec['模板名稱']}"
