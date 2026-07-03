@@ -2,9 +2,13 @@
 銷貨單 RTF 解析模組
 
 RTF 文件使用絕對定位文字框（\\shp），每個欄位是獨立的文字框。
-品項列固定欄位（按 X 座標排序）：
-  Col 0 = 序號  Col 1 = 本公司料號  Col 2 = 品名+規格(合一)
-  Col 3 = 數量  Col 4 = 單位(略)   Col 5+ = 備注/批號
+欄位邊界由標題列（品名/規格、數量）的 X 座標決定：
+  seq    = 序號欄（最左）
+  item_no= 本公司料號（seq 與 品名 之間）
+  name   = 品名（品名/規格欄位的 CJK 前綴）
+  spec   = 規格（品名/規格欄位中非 CJK 部分，X 在 name_col_x ~ qty_col_x 之間）
+  qty    = 數量（qty_col_x ± BAND）
+  post   = 單位/備注/批號（qty_col_x 之後）
 
 批號 vs 客戶料號分類規則（兩階段）：
   - 若該品項含 12 位純數字批號 → R/P+數字視為客戶料號，12位=批號
@@ -265,26 +269,48 @@ def _extract_shapes(text: str) -> list[dict]:
     return shapes
 
 
+def _find_col_x_from_header(shapes: list[dict]) -> dict[str, int]:
+    """
+    從所有 shapes（過濾噪音前）找標題列的欄位 X 座標。
+    回傳 {'name': x, 'qty': x}（找到幾個回傳幾個）。
+    """
+    result: dict[str, int] = {}
+    for s in shapes:
+        for v in s['vals']:
+            if '品名' in v and 'name' not in result:
+                result['name'] = s['left']
+            if v == '數量' and 'qty' not in result:
+                result['qty'] = s['left']
+    return result
+
+
 def _parse_items_by_position(rtf_bytes: bytes, ship_date: str, customer: str) -> list[dict]:
     """
-    按文字框的 X 座標（shpleft）決定欄位，Y 座標（shptop）決定列。
-    同一 Y（±30 twips）的文字框組成一列；列內按 X 排序後：
-      Col 0 = 序號  Col 1 = 本公司料號  Col 2 = 品名+規格
-      Col 3 = 數量  Col 4 = 單位（短中文，略）  Col 5+ = 備注/批號
-    多頁文件同一相對 Y 有多個品項，按 RTF byte 順序區分頁次。
+    按文字框的 X/Y 座標解析品項。
+    主要路徑：先從標題列取得「品名/規格」和「數量」的 X 座標，以此為邊界，
+      將邊界內所有文字框收入品名+規格（避免規格文字因 X 偏移被漏掉）。
+    退路：找不到標題時退回原有 X bucket rank 方法。
     """
     text = rtf_bytes.decode('cp950', errors='replace')
     shapes = _extract_shapes(text)
 
-    # 過濾純噪音文字框（表頭標籤、頁尾標記、公司名等）
+    # ── 先從標題找欄位邊界（過濾噪音前）────────────────────────────
+    col_x      = _find_col_x_from_header(shapes)
+    name_col_x = col_x.get('name')
+    qty_col_x  = col_x.get('qty')
+    BAND       = 150   # twips，欄位邊界容忍（~2.6mm）
+
+    use_header = (name_col_x is not None and qty_col_x is not None
+                  and qty_col_x > name_col_x + BAND * 2)
+
+    # ── 過濾純噪音文字框 ─────────────────────────────────────────────
     def _noise(vals: list[str]) -> bool:
         return all(_is_header_noise(v) or v in _FOOTER_STOP for v in vals)
     shapes = [s for s in shapes if not _noise(s['vals'])]
 
-    Y_TOL = 60   # 增大容忍度：同列文字框 Y 座標可能差到 60 twips（~1mm）
-    X_TOL = 30
+    Y_TOL = 60
 
-    # 按 Y 分組
+    # ── 按 Y 分組 ────────────────────────────────────────────────────
     y_buckets: dict[int, list[dict]] = {}
     for s in shapes:
         key = next((k for k in y_buckets if abs(k - s['top']) <= Y_TOL), None)
@@ -299,53 +325,103 @@ def _parse_items_by_position(rtf_bytes: bytes, ship_date: str, customer: str) ->
     for top in sorted(y_buckets):
         row_shapes = y_buckets[top]
 
-        # 按 X 分組，每格按 byte 順序排（=頁次順序）
-        x_buckets: dict[int, list[dict]] = {}
-        for s in row_shapes:
-            key = next((k for k in x_buckets if abs(k - s['left']) <= X_TOL), None)
-            if key is None:
-                key = s['left']
-                x_buckets[key] = []
-            x_buckets[key].append(s)
-        for k in x_buckets:
-            x_buckets[k].sort(key=lambda s: s['pos'])
-
-        # 找序號欄（最小 X 且包含序號值）
-        seq_x = next(
-            (x for x in sorted(x_buckets)
-             if any(_is_seq(v) for s in x_buckets[x] for v in s['vals'])),
-            None,
+        # ── 找序號 shapes（排序依 byte 位置 = 頁次順序）────────────
+        seq_shapes = sorted(
+            [s for s in row_shapes if any(_is_seq(v) for v in s['vals'])],
+            key=lambda s: s['pos'],
         )
-        if seq_x is None:
+        if not seq_shapes:
             continue
 
-        n_items = len(x_buckets[seq_x])          # 序號格有幾個 shape = 有幾頁品項
-        sorted_x = sorted(x for x in x_buckets)  # 欄位 X 座標由小到大
+        n_items = len(seq_shapes)
+
+        if use_header:
+            # 每頁的 byte 位置上界（用相鄰序號 shape 的 pos 分界）
+            page_ends = [
+                seq_shapes[i + 1]['pos'] if i + 1 < n_items else float('inf')
+                for i in range(n_items)
+            ]
+
+            def _page_shapes(band: list[dict], pg: int) -> list[dict]:
+                """回傳 band 中屬於第 pg 頁的 shapes，依 X 排序。"""
+                e_pos = page_ends[pg]
+                s_pos = seq_shapes[pg]['pos']
+                # pg=0 也收比第一個 seq 稍早的 shapes（RTF 可能先寫其他欄）
+                sel = [s for s in band
+                       if (pg == 0 and s['pos'] < e_pos)
+                       or (pg > 0 and s_pos <= s['pos'] < e_pos)]
+                return sorted(sel, key=lambda s: s['left'])
+
+            # 預先切各欄 band（依標題 X 座標）
+            ns_band   = [s for s in row_shapes
+                         if name_col_x - BAND <= s['left'] < qty_col_x - BAND]
+            qty_band  = [s for s in row_shapes
+                         if qty_col_x - BAND <= s['left'] <= qty_col_x + BAND]
+            post_band = [s for s in row_shapes if s['left'] > qty_col_x + BAND]
+
+        else:
+            # Fallback：X bucket rank（原方法）
+            X_TOL = 30
+            x_buckets: dict[int, list[dict]] = {}
+            for s in row_shapes:
+                key = next((k for k in x_buckets if abs(k - s['left']) <= X_TOL), None)
+                if key is None:
+                    key = s['left']
+                    x_buckets[key] = []
+                x_buckets[key].append(s)
+            for k in x_buckets:
+                x_buckets[k].sort(key=lambda s: s['pos'])
+            sorted_x = sorted(x_buckets)
 
         for item_idx in range(n_items):
-            def gcv(col_rank: int) -> list[str]:
-                if col_rank >= len(sorted_x):
-                    return []
-                bucket = x_buckets[sorted_x[col_rank]]
-                return bucket[item_idx]['vals'] if item_idx < len(bucket) else []
-
-            seq = next((v for v in gcv(0) if _is_seq(v)), None)
+            seq = next((v for v in seq_shapes[item_idx]['vals'] if _is_seq(v)), None)
             if not seq or seq in seen_seqs:
                 continue
             seen_seqs.add(seq)
 
             item = _blank_item(seq, ship_date, customer)
 
-            # Col 1: 本公司料號
-            item["item_no"] = gcv(1)[0] if gcv(1) else ""
+            if use_header:
+                # 本公司料號：X 在 seq 和 品名欄 之間
+                seq_left = seq_shapes[item_idx]['left']
+                ino_band = [s for s in row_shapes
+                            if seq_left < s['left'] < name_col_x - BAND]
+                ino_pg = _page_shapes(ino_band, item_idx)
+                item['item_no'] = ino_pg[0]['vals'][0] if ino_pg and ino_pg[0]['vals'] else ''
 
-            # Col 2: 品名 + 規格（合一文字框）
-            # 連續純 CJK 字元為品名，第一個非 CJK 字元（含混合值的後半）開始為規格
-            # 例：["頂針Φ", "0.7*10", "度", "*200um"]
-            #   → 品名="頂針"，規格="Φ 0.7*10 度 *200um"
-            ns = gcv(2)
+                # 品名 + 規格：name_col_x ~ qty_col_x 之間的所有文字框
+                ns_pg = _page_shapes(ns_band, item_idx)
+                ns    = [v for s in ns_pg for v in s['vals']]
+
+                # 數量：qty_col_x ± BAND
+                qty_pg   = _page_shapes(qty_band, item_idx)
+                qty_vals = [v for s in qty_pg for v in s['vals']]
+
+                # 後置（單位/備注/批號）：qty_col_x 之後
+                post_pg   = _page_shapes(post_band, item_idx)
+                post_vals = [v for s in post_pg for v in s['vals']
+                             if not (_is_chinese(v) and len(v) <= 3)]
+
+            else:
+                def gcv(col_rank: int, _ii: int = item_idx) -> list[str]:
+                    if col_rank >= len(sorted_x):
+                        return []
+                    bucket = x_buckets[sorted_x[col_rank]]
+                    return bucket[_ii]['vals'] if _ii < len(bucket) else []
+
+                item['item_no'] = gcv(1)[0] if gcv(1) else ''
+                ns       = gcv(2)
+                qty_vals = gcv(3)
+                post_vals = [v for v in gcv(3) if not _is_qty(v)]
+                for ci in range(4, len(sorted_x)):
+                    for v in gcv(ci):
+                        if _is_chinese(v) and len(v) <= 3:
+                            continue
+                        post_vals.append(v)
+
+            # ── 品名 vs 規格分割 ─────────────────────────────────────
             name_parts: list[str] = []
-            desc_vals: list[str] = []
+            desc_vals:  list[str] = []
             _name_done = False
             for v in ns:
                 if _name_done:
@@ -354,37 +430,21 @@ def _parse_items_by_position(rtf_bytes: bytes, ship_date: str, customer: str) ->
                 cjk, rest = _split_cjk_prefix(v)
                 if cjk:
                     name_parts.append(cjk)
-                    if rest:          # 混合值：CJK 品名 + 非 CJK 規格起頭
+                    if rest:
                         desc_vals.append(rest)
                         _name_done = True
                 else:
                     _name_done = True
                     desc_vals.append(v)
-            item["name"] = "".join(name_parts)
-            item["description"] = " ".join(desc_vals).strip()
+            item['name']        = ''.join(name_parts)
+            item['description'] = ' '.join(desc_vals).strip()
 
-            # Col 3: 數量（非數量格式的值可能是規格延伸，加入後置處理）
-            qty_str = next((v for v in gcv(3) if _is_qty(v)), "")
-            item["quantity"] = _clean_qty(qty_str) if qty_str else 0
+            # ── 數量 ─────────────────────────────────────────────────
+            qty_str = next((v for v in qty_vals if _is_qty(v)), '')
+            item['quantity'] = _clean_qty(qty_str) if qty_str else 0
 
-            # Col 4+: 單位（短中文，跳過）→ 備注 / 批號
-            post_vals: list[str] = []
-            # Col 3 中非數量的值（如 *100um*12mm 位置偏移落入此欄）→ 補入後置
-            post_vals.extend(v for v in gcv(3) if not _is_qty(v))
-            for ci in range(4, len(sorted_x)):
-                for v in gcv(ci):
-                    if _is_chinese(v) and len(v) <= 3:
-                        continue   # 單位（個/支/PCS等），略
-                    post_vals.append(v)
-
+            # ── 後置分類（批號/備注）─────────────────────────────────
             _classify_post_item(item, post_vals)
-
-            # 後置欄位中不符合批號/料號格式的值（如 *100um*12mm）→ 補入規格
-            _extra = [v for v in post_vals
-                      if not _is_12digit_lot(v) and not _is_rp_lot(v) and not _is_part_no(v)]
-            if _extra:
-                _extra_str = " ".join(_extra)
-                item["description"] = (item["description"] + " " + _extra_str).strip() if item["description"] else _extra_str
 
             items.append(item)
 
