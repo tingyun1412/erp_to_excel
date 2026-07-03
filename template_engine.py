@@ -216,7 +216,7 @@ def analyze_template(wb: openpyxl.Workbook, sheet_name: str) -> dict:
             unit_rows = 1
 
     if not is_row_repeat_mode:
-        unit_rows = max_row  # 用整張 sheet 高度當一個標籤單元，避免 _detect_unit_rows 誤判
+        unit_rows = _detect_unit_rows(ws, first_unit_cols, max_row)
 
     # 擷取格子資訊
     cells_info = []
@@ -292,16 +292,34 @@ def analyze_template(wb: openpyxl.Workbook, sheet_name: str) -> dict:
     }
 
 
-def _detect_unit_rows(col_vals: list[str]) -> int:
-    if not col_vals:
-        return 8
-    first_val = next((v for v in col_vals if v), "")
-    if not first_val:
-        return 8
-    for i in range(1, len(col_vals)):
-        if col_vals[i] == first_val:
-            return i
-    return len(col_vals)
+def _detect_unit_rows(ws, first_unit_cols: list[int], max_row: int) -> int:
+    """
+    找出模板的列重複週期（= 一個標籤單元的高度）。
+    比對方式：將各欄位值去除數字後比較（樣本數值不同不影響結構比對）。
+    若找不到週期，回傳 max_row（整張 sheet = 一個標籤）。
+    最短週期設為 3，避免誤偵測。
+    """
+    _NUM = re.compile(r'[\d.,]+')
+
+    def row_key(r: int) -> tuple:
+        return tuple(
+            _NUM.sub('', str(ws.cell(row=r, column=c).value or '')).strip()
+            for c in first_unit_cols
+        )
+
+    keys = [row_key(r) for r in range(1, max_row + 1)]
+    k0 = keys[0]
+    if not any(k0):
+        return max_row
+
+    for p in range(3, max_row // 2 + 1):
+        if keys[p] != k0:
+            continue
+        if all(keys[off] == keys[p + off]
+               for off in range(p) if p + off < len(keys)):
+            return p
+
+    return max_row
 
 
 def analyze_all_sheets(wb: openpyxl.Workbook) -> dict[str, dict]:

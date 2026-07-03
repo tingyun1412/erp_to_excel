@@ -248,18 +248,15 @@ with tab_label:
                     with st.expander("📦 分裝設定"):
                         _pkg_enable = st.checkbox("啟用分裝", key="pkg_enable")
                         if _pkg_enable:
-                            _pc1, _pc2 = st.columns(2)
-                            with _pc1:
-                                _pkg_small = st.checkbox("小標籤（每箱數量）", value=True, key="pkg_small")
-                            with _pc2:
-                                _pkg_large = st.checkbox("大標籤（總量）", value=True, key="pkg_large")
-
+                            st.caption("填入每箱數量；若每箱數量 ≥ 總數量表示只有一箱，只印一張標籤")
                             _pkg_df = pd.DataFrame([
                                 {
                                     "料號":   itm.get("item_no", ""),
                                     "品名":   itm.get("name", ""),
                                     "總數量": int(float(itm.get("quantity") or 0)),
                                     "每箱數量": int(float(itm.get("quantity") or 1)),
+                                    "小標籤": True,
+                                    "大標籤": True,
                                 }
                                 for itm, _ in selected_items
                             ])
@@ -270,20 +267,19 @@ with tab_label:
                                     "品名":   st.column_config.TextColumn(disabled=True, width="small"),
                                     "總數量": st.column_config.NumberColumn(disabled=True, width="small"),
                                     "每箱數量": st.column_config.NumberColumn(min_value=1, width="small"),
+                                    "小標籤": st.column_config.CheckboxColumn(width="small"),
+                                    "大標籤": st.column_config.CheckboxColumn(width="small"),
                                 },
                                 hide_index=True,
                                 use_container_width=True,
                                 key="pkg_table",
                             )
-                            _pkg_sizes = dict(zip(_pkg_edited["料號"], _pkg_edited["每箱數量"]))
                         else:
-                            _pkg_small = _pkg_large = True
-                            _pkg_sizes = {}
+                            _pkg_edited = None
 
                 else:
                     _pkg_enable = False
-                    _pkg_small = _pkg_large = True
-                    _pkg_sizes = {}
+                    _pkg_edited = None
                     st.warning("請選擇至少一張銷貨單")
 
                 # 警告：模板無動態欄位 → 標籤只有固定文字
@@ -303,29 +299,40 @@ with tab_label:
                     with st.spinner("產出中..."):
                         try:
                             # 套用分裝：展開品項
-                            def _expand_orders(orders, pkg_sizes, use_small, use_large):
+                            def _expand_orders(orders, pkg_df):
                                 result = []
                                 for o in orders:
                                     new_o = dict(o)
                                     new_items = []
                                     for itm in o.get("items", []):
                                         total = float(itm.get("quantity") or 0)
-                                        pkg = float(pkg_sizes.get(itm.get("item_no", ""), total) or total)
-                                        n = max(1, math.ceil(total / pkg)) if pkg else 1
-                                        if use_small and pkg < total:
-                                            for _ in range(n):
-                                                s = dict(itm)
-                                                s["quantity"] = int(pkg)
-                                                new_items.append(s)
-                                        if use_large or (not use_small) or pkg >= total:
+                                        rows = pkg_df[pkg_df["料號"] == itm.get("item_no", "")]
+                                        if rows.empty:
                                             new_items.append(dict(itm))
+                                            continue
+                                        row = rows.iloc[0]
+                                        pkg = max(1.0, float(row["每箱數量"] or total))
+                                        use_small = bool(row["小標籤"])
+                                        use_large = bool(row["大標籤"])
+                                        if pkg >= total or total == 0:
+                                            # 只有一箱，印一張
+                                            new_items.append(dict(itm))
+                                        else:
+                                            n = math.ceil(total / pkg)
+                                            if use_small:
+                                                for _ in range(n):
+                                                    s = dict(itm)
+                                                    s["quantity"] = int(pkg)
+                                                    new_items.append(s)
+                                            if use_large:
+                                                new_items.append(dict(itm))
                                     new_o["items"] = new_items
                                     result.append(new_o)
                                 return result
 
                             _gen_orders = (
-                                _expand_orders(selected_orders, _pkg_sizes, _pkg_small, _pkg_large)
-                                if _pkg_enable and _pkg_sizes
+                                _expand_orders(selected_orders, _pkg_edited)
+                                if _pkg_enable and _pkg_edited is not None
                                 else selected_orders
                             )
 
