@@ -573,6 +573,7 @@ def parse_sales_order_rtf(file_path) -> dict:
                 break
 
     result["items"] = _parse_items_by_position(raw, result["order_date"], customer_from_filename)
+    _supplement_items_from_raw(result["items"], values)
 
     return result
 
@@ -816,6 +817,62 @@ def _parse_format_c(vals, ship_date, customer):
         items.append(item)
 
     return items
+
+
+def _supplement_items_from_raw(items: list[dict], values: list[str]):
+    """
+    Shape 解析後，用 raw_values 補充 description 裡可能缺漏的規格文字。
+    RTF 有時 shape 只包含部分規格，完整文字在 table cell（\\trowd）。
+    """
+    for item in items:
+        seq = item["seq"]
+        try:
+            si = values.index(seq)
+        except ValueError:
+            continue
+
+        # 找 seq 之後第一個數量值
+        qi = next((i for i, v in enumerate(values[si + 1:], si + 1) if _is_qty(v)), None)
+        if qi is None:
+            continue
+
+        segment = values[si + 1 : qi]
+
+        # 去除重複（保留第一次出現）
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for v in segment:
+            if v not in seen:
+                seen.add(v)
+                deduped.append(v)
+
+        # 找出 description 裡還沒有的規格值
+        existing = set(item["description"].split()) if item["description"] else set()
+        name_val  = item["name"]
+        name_done = bool(name_val)
+        extras: list[str] = []
+
+        for v in deduped:
+            if v == name_val:
+                continue
+            if v in existing:
+                continue
+            if _is_header_noise(v) or v in _FOOTER_STOP:
+                continue
+            if _is_qty(v):
+                continue
+            if _is_12digit_lot(v) or _is_rp_lot(v):
+                continue
+            if _is_part_no(v) and not _is_spec(v):
+                continue
+            if _is_chinese(v) and len(v) <= 3 and name_done:
+                continue  # 單位詞 / 短品名片段
+            extras.append(v)
+
+        if extras:
+            suffix = " ".join(extras)
+            item["description"] = (item["description"] + " " + suffix).strip() \
+                if item["description"] else suffix
 
 
 def debug_shapes(file_path) -> list[dict]:
