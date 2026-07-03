@@ -388,6 +388,7 @@ def _parse_items_by_position(rtf_bytes: bytes, ship_date: str, customer: str) ->
                 qty_found     = False
 
                 # 依 X 由左到右掃：第一個料號值 → item_no；數量值 → qty；其餘 → ns
+                # 注意：這裡不過濾短 CJK（避免品名片段如「電木」「度」被誤刪）
                 for s in pre_post_pg:   # _page_shapes 已按 left 排序
                     for v in s['vals']:
                         if not item_no_found and _is_part_no(v) and not _is_spec(v):
@@ -396,7 +397,7 @@ def _parse_items_by_position(rtf_bytes: bytes, ship_date: str, customer: str) ->
                         elif _is_qty(v) and not qty_found:
                             item['quantity'] = _clean_qty(v)
                             qty_found = True
-                        elif not (_is_chinese(v) and len(v) <= 3):
+                        else:
                             ns.append(v)
 
                 # 後置欄位：批號 / 備注 / 單位（短中文跳過）
