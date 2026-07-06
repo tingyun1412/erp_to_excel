@@ -879,12 +879,9 @@ def write_lscr_labels(
 
     # 欄寬：從 template 讀取（內容欄 + 間距欄），還原原始版面
     for ui in range(3):
-        # 內容欄
+        # 內容欄（固定 27，比原始模板略寬以容納 LOGO + 文字）
         for c_off in range(columns_per_unit):
-            tmpl_letter = get_column_letter(first_unit_start_col + c_off)
-            w = ws_tmpl.column_dimensions[tmpl_letter].width \
-                if tmpl_letter in ws_tmpl.column_dimensions else 23.5
-            ws_out.column_dimensions[get_column_letter(ui * unit_width + c_off + 1)].width = w
+            ws_out.column_dimensions[get_column_letter(ui * unit_width + c_off + 1)].width = 27
         # 間距欄（slot 之間）
         for g in range(gap_cols):
             gap_tmpl_letter = get_column_letter(first_unit_start_col + columns_per_unit + g)
