@@ -877,13 +877,10 @@ def write_lscr_labels(
     ws_out = wb_out.active
     ws_out.title = "Labels"
 
-    # 3 個 slot 的欄寬
-    for c_off in range(columns_per_unit):
-        tmpl_letter = get_column_letter(first_unit_start_col + c_off)
-        w = ws_tmpl.column_dimensions[tmpl_letter].width \
-            if tmpl_letter in ws_tmpl.column_dimensions else 10
-        for ui in range(3):
-            ws_out.column_dimensions[get_column_letter(ui * unit_width + c_off + 1)].width = w
+    # 3 個 slot 的欄寬（固定 24.5，避免 LOGO 蓋住文字）
+    for ui in range(3):
+        for c_off in range(columns_per_unit):
+            ws_out.column_dimensions[get_column_letter(ui * unit_width + c_off + 1)].width = 24.5
 
     unit_merges = [
         m for m in ws_tmpl.merged_cells.ranges
