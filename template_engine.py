@@ -738,14 +738,15 @@ def _copy_passthrough_images(
     col_offset: int = 0, only_cols: set = None
 ):
     """
-    Copy TwoCellAnchor images from template to output with row (and optional col) offset.
-    Preserves TwoCellAnchor structure so Excel renders correct size.
+    Copy TwoCellAnchor images from template to output with row/col offset.
+    Preserves TwoCellAnchor structure so Excel renders correct image size.
     label_start_row: 1-indexed row in output where this label starts.
-    col_offset: extra 0-based column offset to add (for multi-slot layouts).
+    col_offset: extra 0-based column offset (for multi-slot layouts).
     only_cols: if set, only copy images whose _from.col (0-based) is in this set.
     """
     import io as _io
     from openpyxl.drawing.image import Image as XLImage
+    from openpyxl.drawing.spreadsheet_drawing import TwoCellAnchor, AnchorMarker
 
     seen: set = set()
     row_off = label_start_row - 1
@@ -765,24 +766,48 @@ def _copy_passthrough_images(
             continue
         seen.add(pos)
         try:
+            # Read image bytes — try getvalue() first (BytesIO, position-independent)
             raw = None
-            if hasattr(img, '_data') and callable(img._data):
-                raw = img._data()
-            elif hasattr(img, 'ref'):
-                ref = img.ref
+            ref = getattr(img, 'ref', None)
+            if ref is not None:
                 if isinstance(ref, (bytes, bytearray)):
                     raw = bytes(ref)
+                elif hasattr(ref, 'getvalue'):
+                    raw = ref.getvalue()
                 elif hasattr(ref, 'read'):
-                    ref.seek(0)
+                    try:
+                        ref.seek(0)
+                    except Exception:
+                        pass
                     raw = ref.read()
             if not raw:
+                try:
+                    d = img._data
+                    raw = d() if callable(d) else (bytes(d) if d else None)
+                except Exception:
+                    pass
+            if not raw:
                 continue
+
             new_img = XLImage(_io.BytesIO(raw))
-            new_anchor = copy.deepcopy(anchor)
-            new_anchor._from.row = fr + row_off
-            new_anchor._from.col = fc + col_offset
-            new_anchor.to.row = anchor.to.row + row_off
-            new_anchor.to.col = anchor.to.col + col_offset
+            # Explicitly construct anchor — avoids deepcopy failures on complex openpyxl objects
+            new_anchor = TwoCellAnchor()
+            new_anchor._from = AnchorMarker(
+                col=fc + col_offset,
+                colOff=getattr(anchor._from, 'colOff', 0),
+                row=fr + row_off,
+                rowOff=getattr(anchor._from, 'rowOff', 0),
+            )
+            new_anchor.to = AnchorMarker(
+                col=anchor.to.col + col_offset,
+                colOff=getattr(anchor.to, 'colOff', 0),
+                row=anchor.to.row + row_off,
+                rowOff=getattr(anchor.to, 'rowOff', 0),
+            )
+            try:
+                new_anchor.editAs = anchor.editAs
+            except Exception:
+                pass
             new_img.anchor = new_anchor
             ws_out.add_image(new_img)
         except Exception:
@@ -937,7 +962,7 @@ def write_lscr_labels(
             for row_idx in range(n_rows):
                 for ri_str, h in row_heights.items():
                     if h is not None:
-                        ws_out.row_dimensions[current_row + int(ri_str) - 1].height = h
+                        ws_out.row_dimensions[current_row + int(ri_str) - 1].height = h + 2
 
                 si0 = row_idx * 2
                 if si0 < len(smalls):
