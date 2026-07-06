@@ -364,7 +364,7 @@ def _fill_value(cell_info: dict, item: dict, order: dict, seq: int) -> str | Non
         return _get_value(item, order, field, seq)
 
 
-def _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info: dict, orders: list[dict], logo_imgs: list = None):
+def _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info: dict, orders: list[dict]):
     """
     Passthrough 模式：直接複製 template 的格子（保留格式），再覆寫動態欄位。
     """
@@ -397,14 +397,18 @@ def _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info: dict, orders: li
 
     all_items = [(item, order) for order in orders for item in order.get("items", [])]
     current_row = 1
-    seq = 1
 
-    for item, order in all_items:
+    # 每列放不同品項（最多 units_per_row 張），不重複
+    for group_start in range(0, len(all_items), units_per_row):
+        group = all_items[group_start:group_start + units_per_row]
+
         # 行高
         for ri_str, h in row_heights.items():
-            ws_out.row_dimensions[current_row + int(ri_str) - 1].height = h
+            if h is not None:
+                ws_out.row_dimensions[current_row + int(ri_str) - 1].height = h
 
-        for ui in range(units_per_row):
+        for ui, (item, order) in enumerate(group):
+            seq = group_start + ui + 1
             base_col = ui * (columns_per_unit + gap_cols)
 
             # 1. 複製 template 所有格子（保留值 + 樣式）
@@ -445,11 +449,8 @@ def _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info: dict, orders: li
                     ws_out.cell(row=current_row + dc["row"] - 1,
                                 column=base_col + dc["col"]).value = val
 
-        if logo_imgs:
-            _place_label_images(ws_out, logo_imgs, current_row, ws_tmpl)
-
+        _copy_passthrough_images(ws_out, ws_tmpl, unit_rows, current_row)
         current_row += unit_rows + 1
-        seq += 1
 
 
 def _write_order_to_sheet(
@@ -463,7 +464,7 @@ def _write_order_to_sheet(
     is_row_repeat    = template_info.get("is_row_repeat_mode", False)
 
     if template_info.get("is_passthrough") and ws_tmpl and not is_row_repeat:
-        _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info, orders, logo_imgs)
+        _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info, orders)
         return
 
     unit_rows        = template_info["unit_rows"]
@@ -655,23 +656,8 @@ def _extract_logo_images(ws_src) -> list[dict]:
                     rel_row    = anchor._from.row
                     col_letter = get_column_letter(anchor._from.col + 1)
             elif hasattr(anchor, '_from') and hasattr(anchor, 'to'):
-                # TwoCellAnchor：用欄寬/列高估算像素尺寸
-                fr = anchor._from.row  # 0-based
-                fc = anchor._from.col
-                tr = anchor.to.row
-                tc = anchor.to.col
-                h_pt = sum(
-                    ws_src.row_dimensions[r].height or 15
-                    for r in range(fr + 1, tr + 2)
-                )
-                h_px = int(h_pt * 96 / 72)
-                w_ch = sum(
-                    ws_src.column_dimensions[get_column_letter(c + 1)].width or 8
-                    for c in range(fc, tc + 1)
-                )
-                w_px = int(w_ch * 7.5)
-                rel_row = fr
-                col_letter = get_column_letter(fc + 1)
+                # TwoCellAnchor：由 _copy_passthrough_images 直接複製，這裡跳過
+                continue
             elif isinstance(anchor, str):
                 m = re.match(r'^([A-Za-z]+)(\d+)$', anchor.strip())
                 if m:
@@ -747,6 +733,62 @@ def _place_label_images(ws_out, logo_imgs: list, label_start_row: int, ws_tmpl=N
             pass
 
 
+def _copy_passthrough_images(
+    ws_out, ws_tmpl, unit_rows: int, label_start_row: int,
+    col_offset: int = 0, only_cols: set = None
+):
+    """
+    Copy TwoCellAnchor images from template to output with row (and optional col) offset.
+    Preserves TwoCellAnchor structure so Excel renders correct size.
+    label_start_row: 1-indexed row in output where this label starts.
+    col_offset: extra 0-based column offset to add (for multi-slot layouts).
+    only_cols: if set, only copy images whose _from.col (0-based) is in this set.
+    """
+    import io as _io
+    from openpyxl.drawing.image import Image as XLImage
+
+    seen: set = set()
+    row_off = label_start_row - 1
+
+    for img in getattr(ws_tmpl, '_images', []):
+        anchor = img.anchor
+        if not (hasattr(anchor, '_from') and hasattr(anchor, 'to')):
+            continue
+        fr = anchor._from.row
+        fc = anchor._from.col
+        if fr >= unit_rows:
+            continue
+        if only_cols is not None and fc not in only_cols:
+            continue
+        pos = (fr, fc)
+        if pos in seen:
+            continue
+        seen.add(pos)
+        try:
+            raw = None
+            if hasattr(img, '_data') and callable(img._data):
+                raw = img._data()
+            elif hasattr(img, 'ref'):
+                ref = img.ref
+                if isinstance(ref, (bytes, bytearray)):
+                    raw = bytes(ref)
+                elif hasattr(ref, 'read'):
+                    ref.seek(0)
+                    raw = ref.read()
+            if not raw:
+                continue
+            new_img = XLImage(_io.BytesIO(raw))
+            new_anchor = copy.deepcopy(anchor)
+            new_anchor._from.row = fr + row_off
+            new_anchor._from.col = fc + col_offset
+            new_anchor.to.row = anchor.to.row + row_off
+            new_anchor.to.col = anchor.to.col + col_offset
+            new_img.anchor = new_anchor
+            ws_out.add_image(new_img)
+        except Exception:
+            pass
+
+
 def _copy_style(ws_tmpl, row: int, col: int, dst_cell):
     if ws_tmpl is None:
         return
@@ -777,3 +819,151 @@ def template_from_json(s: str) -> dict:
 
 def get_field_options() -> list[str]:
     return FIELD_LABELS
+
+
+def write_lscr_labels(
+    orders: list[dict],
+    wb_tmpl,
+    tmpl_info: dict,
+    include_small: bool = True,
+    include_large: bool = True,
+) -> BytesIO:
+    """
+    LSCR 專用排版：小標籤兩張並排，大標籤置於第一列第三欄。
+    每個品項：
+      列 1：[小 0][小 1][大]
+      列 2：[小 2][小 3]
+      …
+    """
+    import math
+
+    ws_tmpl = wb_tmpl["lable"]
+
+    unit_rows            = tmpl_info["unit_rows"]
+    columns_per_unit     = tmpl_info["columns_per_unit"]
+    gap_cols             = tmpl_info.get("gap_cols", 1)
+    first_unit_start_col = tmpl_info.get("first_unit_start_col", 1)
+    data_cells = [c for c in tmpl_info["cells"]
+                  if not c.get("is_header") and c.get("field", "__fixed__") != "__fixed__"]
+    row_heights  = tmpl_info.get("row_heights", {})
+    unit_width   = columns_per_unit + gap_cols  # 每個 slot 的欄數（含間距）
+
+    wb_out = openpyxl.Workbook()
+    ws_out = wb_out.active
+    ws_out.title = "Labels"
+
+    # 3 個 slot 的欄寬
+    for c_off in range(columns_per_unit):
+        tmpl_letter = get_column_letter(first_unit_start_col + c_off)
+        w = ws_tmpl.column_dimensions[tmpl_letter].width \
+            if tmpl_letter in ws_tmpl.column_dimensions else 10
+        for ui in range(3):
+            ws_out.column_dimensions[get_column_letter(ui * unit_width + c_off + 1)].width = w
+
+    unit_merges = [
+        m for m in ws_tmpl.merged_cells.ranges
+        if (1 <= m.min_row <= unit_rows and 1 <= m.max_row <= unit_rows and
+            first_unit_start_col <= m.min_col < first_unit_start_col + columns_per_unit)
+    ]
+
+    def _write_slot(item, order, seq, slot_idx, out_row):
+        base_col = slot_idx * unit_width
+        for r in range(1, unit_rows + 1):
+            for c_off in range(columns_per_unit):
+                src = ws_tmpl.cell(row=r, column=first_unit_start_col + c_off)
+                dst = ws_out.cell(row=out_row + r - 1, column=base_col + c_off + 1)
+                if src.value is not None:
+                    dst.value = src.value
+                try:
+                    if src.font:
+                        dst.font = copy.copy(src.font)
+                    if src.fill and getattr(src.fill, 'fill_type', None) not in (None, 'none'):
+                        dst.fill = copy.copy(src.fill)
+                    if src.border:
+                        dst.border = copy.copy(src.border)
+                    if src.alignment:
+                        dst.alignment = copy.copy(src.alignment)
+                except Exception:
+                    pass
+        for m in unit_merges:
+            try:
+                ws_out.merge_cells(
+                    start_row=out_row + m.min_row - 1,
+                    start_column=base_col + m.min_col - first_unit_start_col + 1,
+                    end_row=out_row + m.max_row - 1,
+                    end_column=base_col + m.max_col - first_unit_start_col + 1,
+                )
+            except Exception:
+                pass
+        for dc in data_cells:
+            val = _fill_value(dc, item, order, seq)
+            if val is not None:
+                ws_out.cell(row=out_row + dc["row"] - 1,
+                            column=base_col + dc["col"]).value = val
+
+    current_row = 1
+    global_seq  = 1
+
+    for order in orders:
+        for phys_item in order.get("items", []):
+            total   = float(phys_item.get("_total_qty") or phys_item.get("quantity") or 0)
+            small_q = float(phys_item.get("_small_qty") or total)
+            large_q = float(phys_item.get("_large_qty") or total)
+            small_u = phys_item.get("_small_unit", "PCS")
+            large_u = phys_item.get("_large_unit", "PCS")
+            one_box = (small_q >= total or total == 0)
+
+            smalls     = []
+            large_item = None
+            if one_box:
+                if include_small or include_large:
+                    smalls = [dict(phys_item)]
+            else:
+                if include_small:
+                    n = math.ceil(total / small_q)
+                    for _ in range(n):
+                        s = dict(phys_item)
+                        s["quantity"] = str(int(small_q))
+                        s["unit"]     = small_u
+                        smalls.append(s)
+                if include_large:
+                    large_item = dict(phys_item)
+                    large_item["quantity"] = str(int(large_q))
+                    large_item["unit"]     = large_u
+
+            n_small_rows = math.ceil(len(smalls) / 2) if smalls else 0
+            n_rows       = max(n_small_rows, 1 if large_item else 0)
+
+            for row_idx in range(n_rows):
+                for ri_str, h in row_heights.items():
+                    if h is not None:
+                        ws_out.row_dimensions[current_row + int(ri_str) - 1].height = h
+
+                si0 = row_idx * 2
+                if si0 < len(smalls):
+                    _write_slot(smalls[si0], order, global_seq + si0, 0, current_row)
+
+                si1 = row_idx * 2 + 1
+                if si1 < len(smalls):
+                    _write_slot(smalls[si1], order, global_seq + si1, 1, current_row)
+
+                if row_idx == 0 and large_item:
+                    _write_slot(large_item, order, global_seq + len(smalls), 2, current_row)
+
+                # 複製 logo（slot 0 和 1：col A、col C）
+                _copy_passthrough_images(ws_out, ws_tmpl, unit_rows, current_row)
+                # 複製 logo（slot 2 大標籤：只取 col A 圖片，平移到第三欄）
+                if row_idx == 0 and large_item:
+                    _copy_passthrough_images(
+                        ws_out, ws_tmpl, unit_rows, current_row,
+                        col_offset=2 * unit_width, only_cols={0},
+                    )
+
+                current_row += unit_rows + 1
+
+            global_seq += len(smalls) + (1 if large_item else 0)
+
+    buf = BytesIO()
+    wb_out.save(buf)
+    buf.seek(0)
+    return buf

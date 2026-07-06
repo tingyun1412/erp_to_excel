@@ -25,13 +25,14 @@ if not chrome_dir.exists():
         check=True
     )
 from rtf_parser import parse_sales_order_rtf
-from lscr_parser import parse_lscr_excel_wb, expand_lscr_items
+from lscr_parser import parse_lscr_excel_wb
 from module_b_invoice import generate_invoice_excel
 from template_engine import (
     analyze_template, analyze_all_sheets,
     generate_from_template, generate_labels_multiorder,
     template_to_json, template_from_json,
     get_field_options, FIELD_LABELS, DYNAMIC_FIELDS,
+    write_lscr_labels,
 )
 from sheets_db import (
     load_templates, save_template, delete_template,
@@ -850,14 +851,6 @@ with tab_label:
                     with _lscr_c2:
                         _lscr_large = st.checkbox("印大標籤（總出貨數量）", value=True, key="lscr_large")
 
-                    # 展開後品項數預覽
-                    if _lscr_small or _lscr_large:
-                        _preview_expanded = expand_lscr_items(
-                            _lscr_orders, include_small=_lscr_small, include_large=_lscr_large
-                        )
-                        _n_labels = sum(len(o["items"]) for o in _preview_expanded)
-                        st.caption(f"預計產出 **{_n_labels}** 張標籤（每張佔 2 格並排）")
-
                     if st.button("產出標籤 Excel", type="primary",
                                  use_container_width=True, key="lscr_gen"):
                         with st.spinner("產出中..."):
@@ -866,20 +859,13 @@ with tab_label:
                                 if not _lscr_tmpl_info or not _lscr_tmpl_info.get("cells"):
                                     st.error("無法分析 lable 工作表")
                                 else:
-                                    _gen_orders = expand_lscr_items(
+                                    _buf = write_lscr_labels(
                                         _lscr_orders,
+                                        openpyxl.load_workbook(BytesIO(_lscr_bytes)),
+                                        _lscr_tmpl_info,
                                         include_small=_lscr_small,
                                         include_large=_lscr_large,
                                     )
-                                    _pairs = [
-                                        {
-                                            "order": o,
-                                            "template_info": _lscr_tmpl_info,
-                                            "template_wb": openpyxl.load_workbook(BytesIO(_lscr_bytes)),
-                                        }
-                                        for o in _gen_orders
-                                    ]
-                                    _buf = generate_labels_multiorder(_pairs)
                                     st.download_button(
                                         "⬇️ 下載標籤.xlsx",
                                         data=_buf,
