@@ -26,7 +26,11 @@ if not chrome_dir.exists():
     )
 from rtf_parser import parse_sales_order_rtf
 from lscr_parser import parse_lscr_excel_wb
-from module_b_invoice import generate_invoice_excel
+from module_b_invoice import (
+    generate_invoice_excel,
+    parse_acceptance_excel,
+    generate_invoice_from_acceptance,
+)
 from template_engine import (
     analyze_template, analyze_all_sheets,
     generate_from_template, generate_labels_multiorder,
@@ -891,47 +895,129 @@ with tab_invoice:
     st.subheader("電子發票")
     st.caption("依照 e-invoice.com.tw V1.6 格式產生上傳檔")
 
-    all_orders = st.session_state.parsed_orders
-    if not all_orders:
-        st.info("請先在左側上傳並解析銷貨單")
-    else:
-        # 選銷貨單
-        order_map = {
-            f"{o.get('order_no','')} — {o.get('customer_code','')} ({len(o.get('items',[]))} 項)": o
-            for o in all_orders
-        }
-        selected_keys = st.multiselect(
-            "選擇要開發票的銷貨單",
-            options=list(order_map.keys()),
-            default=list(order_map.keys()),
-        )
-        selected_orders = [order_map[k] for k in selected_keys if order_map[k].get("items")]
+    _inv_tab_rtf, _inv_tab_monthly = st.tabs(["從銷貨單", "月結（驗收資訊）"])
 
-        if selected_orders:
-            _with_inv    = [o for o in selected_orders if o.get("invoice_no")]
-            _without_inv = [o for o in selected_orders if not o.get("invoice_no")]
-
-            if _with_inv:
-                st.success(f"共 **{len(_with_inv)}** 張有發票號碼，將產出發票")
-            if _without_inv:
-                _no_inv_nos = [o.get("order_no","(未知)") for o in _without_inv]
-                st.warning(f"{len(_without_inv)} 張無發票號碼（略過）：{', '.join(_no_inv_nos)}")
-
-            st.caption("發票人統編：**24405403**　受票人統編：從銷貨單統一編號　單價：暫定 100（待確認）")
-
-            if _with_inv and st.button("產出電子發票 xls", type="primary", use_container_width=True):
-                try:
-                    buf = generate_invoice_excel(_with_inv)
-                    st.download_button(
-                        "⬇️ 下載電子發票上傳檔.xls",
-                        data=buf,
-                        file_name="電子發票上傳.xls",
-                        mime="application/vnd.ms-excel",
-                        use_container_width=True,
-                    )
-                except Exception as _inv_e:
-                    import traceback as _inv_tb
-                    st.error(f"產出失敗：{_inv_e}")
-                    st.code(_inv_tb.format_exc())
+    # ── 從銷貨單 ─────────────────────────────────────────────────
+    with _inv_tab_rtf:
+        all_orders = st.session_state.parsed_orders
+        if not all_orders:
+            st.info("請先在左側上傳並解析銷貨單")
         else:
-            st.warning("請選擇至少一張銷貨單")
+            order_map = {
+                f"{o.get('order_no','')} — {o.get('customer_code','')} ({len(o.get('items',[]))} 項)": o
+                for o in all_orders
+            }
+            selected_keys = st.multiselect(
+                "選擇要開發票的銷貨單",
+                options=list(order_map.keys()),
+                default=list(order_map.keys()),
+            )
+            selected_orders = [order_map[k] for k in selected_keys if order_map[k].get("items")]
+
+            if selected_orders:
+                _with_inv    = [o for o in selected_orders if o.get("invoice_no")]
+                _without_inv = [o for o in selected_orders if not o.get("invoice_no")]
+
+                if _with_inv:
+                    st.success(f"共 **{len(_with_inv)}** 張有發票號碼，將產出發票")
+                if _without_inv:
+                    _no_inv_nos = [o.get("order_no","(未知)") for o in _without_inv]
+                    st.warning(f"{len(_without_inv)} 張無發票號碼（略過）：{', '.join(_no_inv_nos)}")
+
+                st.caption("發票人統編：**24405403**　受票人統編：從銷貨單統一編號　單價：暫定 100（待確認）")
+
+                if _with_inv and st.button("產出電子發票 xls", type="primary",
+                                           use_container_width=True, key="inv_rtf_gen"):
+                    try:
+                        buf = generate_invoice_excel(_with_inv)
+                        st.download_button(
+                            "⬇️ 下載電子發票上傳檔.xls",
+                            data=buf,
+                            file_name="電子發票上傳.xls",
+                            mime="application/vnd.ms-excel",
+                            use_container_width=True,
+                        )
+                    except Exception as _inv_e:
+                        import traceback as _inv_tb
+                        st.error(f"產出失敗：{_inv_e}")
+                        st.code(_inv_tb.format_exc())
+            else:
+                st.warning("請選擇至少一張銷貨單")
+
+    # ── 月結（驗收資訊 xlsx） ─────────────────────────────────────
+    with _inv_tab_monthly:
+        st.caption("上傳從 ERP 匯出的「驗收資訊」xlsx，整批開一張月結發票")
+
+        _acc_up = st.file_uploader(
+            "上傳驗收資訊 xlsx",
+            type=["xlsx"],
+            key="acc_up",
+        )
+
+        if _acc_up:
+            _acc_bytes = _acc_up.read()
+            try:
+                _acc_rows = parse_acceptance_excel(_acc_bytes)
+            except Exception as _ae:
+                st.error(f"解析失敗：{_ae}")
+                _acc_rows = []
+
+            if _acc_rows:
+                _acc_total = sum(r["amount"] for r in _acc_rows)
+                st.success(f"解析完成：**{len(_acc_rows)}** 行，未稅合計 **{_acc_total:,.0f}**，"
+                           f"稅額 **{round(_acc_total*0.05):,.0f}**，"
+                           f"含稅 **{round(_acc_total*1.05):,.0f}**")
+
+                # 品項預覽
+                st.dataframe(
+                    [{
+                        "出貨單號": r["order_no"],
+                        "單號":     r["line_no"],
+                        "品號":     r["part_no"],
+                        "品名":     r["name"],
+                        "規格":     r["spec"],
+                        "數量":     r["qty"],
+                        "單價":     r["unit_price"],
+                        "金額(未稅)": r["amount"],
+                    } for r in _acc_rows],
+                    use_container_width=True,
+                    hide_index=True,
+                    height=min(400, 38 * (len(_acc_rows) + 1) + 10),
+                )
+
+                st.markdown("**發票資訊**")
+                _inv_col1, _inv_col2, _inv_col3 = st.columns(3)
+                with _inv_col1:
+                    _acc_inv_no = st.text_input("發票號碼", placeholder="AA00000000", key="acc_inv_no")
+                with _inv_col2:
+                    _acc_inv_date = st.date_input("發票日期", key="acc_inv_date")
+                with _inv_col3:
+                    _acc_buyer_id = st.text_input("受票人統編", placeholder="12345678", key="acc_buyer_id")
+
+                st.caption("發票人統編：**24405403**")
+
+                _can_gen = bool(_acc_inv_no and _acc_buyer_id)
+                if not _can_gen:
+                    st.warning("請填入發票號碼與受票人統編")
+
+                if _can_gen and st.button("產出電子發票 xls", type="primary",
+                                          use_container_width=True, key="acc_gen"):
+                    try:
+                        _acc_date_str = _acc_inv_date.strftime("%Y%m%d")
+                        _acc_buf = generate_invoice_from_acceptance(
+                            _acc_rows,
+                            invoice_no=_acc_inv_no.strip(),
+                            invoice_date=_acc_date_str,
+                            buyer_tax_id=_acc_buyer_id.strip(),
+                        )
+                        st.download_button(
+                            "⬇️ 下載電子發票上傳檔.xls",
+                            data=_acc_buf,
+                            file_name=f"電子發票_{_acc_inv_no.strip()}.xls",
+                            mime="application/vnd.ms-excel",
+                            use_container_width=True,
+                        )
+                    except Exception as _ae2:
+                        import traceback as _atb
+                        st.error(f"產出失敗：{_ae2}")
+                        st.code(_atb.format_exc())

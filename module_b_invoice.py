@@ -160,3 +160,132 @@ def generate_invoice_excel(
     wb.save(buf)
     buf.seek(0)
     return buf
+
+
+# ── 月結驗收資訊 ─────────────────────────────────────────────────
+
+
+_ACCEPTANCE_COLS = {
+    "出貨單號": 1, "單號": 2, "品號": 3, "品名": 4, "規格": 5,
+    "出貨數量": 9, "單價": 12, "幣別": 13, "金額(未稅)": 15,
+}
+
+
+def parse_acceptance_excel(content: bytes) -> list[dict]:
+    """
+    解析「驗收資訊」xlsx（月結用），回傳每行 dict：
+      order_no, line_no, part_no, name, spec, qty, unit_price, amount, currency
+    """
+    import openpyxl as _xl
+    wb = _xl.load_workbook(BytesIO(content), data_only=True)
+    ws = wb.active
+
+    def _s(r, c):
+        return str(ws.cell(r, c).value or "").strip()
+
+    def _n(r, c):
+        try:
+            return float(ws.cell(r, c).value or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    # 自動偵測欄位位置（比對第一列標頭）
+    header_map = {}
+    for c in range(1, ws.max_column + 1):
+        h = str(ws.cell(1, c).value or "").strip()
+        if h in _ACCEPTANCE_COLS:
+            header_map[h] = c
+
+    col = lambda key: header_map.get(key, _ACCEPTANCE_COLS[key])
+
+    result = []
+    for r in range(2, ws.max_row + 1):
+        order_no = _s(r, col("出貨單號"))
+        if not order_no:
+            continue
+        result.append({
+            "order_no":   order_no,
+            "line_no":    _s(r, col("單號")),
+            "part_no":    _s(r, col("品號")),
+            "name":       _s(r, col("品名")),
+            "spec":       _s(r, col("規格")),
+            "qty":        _n(r, col("出貨數量")),
+            "unit_price": _n(r, col("單價")),
+            "amount":     _n(r, col("金額(未稅)")),
+            "currency":   _s(r, col("幣別")) or "NTD",
+        })
+    return result
+
+
+def generate_invoice_from_acceptance(
+    rows: list[dict],
+    invoice_no: str,
+    invoice_date: str,
+    buyer_tax_id: str,
+    seller_tax_id: str = SELLER_TAX_ID,
+) -> BytesIO:
+    """
+    從 parse_acceptance_excel 的 rows 產生電子發票上傳 xls。
+    invoice_date: YYYYMMDD 字串
+    """
+    wb = xlwt.Workbook(encoding="utf-8")
+    ws_main   = wb.add_sheet("發票主檔")
+    ws_detail = wb.add_sheet("發票明細")
+
+    main_headers = [
+        "發票號碼(IVNO)", "發票日期(IVDAT)", "發票時間(IVTM)",
+        "未稅金額(IVAMT)", "稅率別(TAXRID)", "營業稅額(SALTAXAMT)",
+        "發票人統一編號(IVPESRFNO)", "受票人統一編號(TAIVPESRFNO)",
+        "款項別(CAID)", "相關號碼(RELNO)", "原幣金額(OCRYAMT)",
+        "匯率(EXR)", "幣別(CUCY)", "彙開(GROPMK)", "通關方式(CSTMMK)",
+        "買方聯絡人(BUYRCTM)", "買方聯絡人部門(BUYRCTMDP)",
+        "買受人電子郵件(CUEMAIL)", "總備註(COMT5)",
+        "發票開立自動通知(OPNAUTNTI)", "作廢發票自動通知(CANCELAUTNTI)",
+        "零稅率原因(ZEROTAXRATEREASON)",
+    ]
+    detail_headers = [
+        "發票號碼(IVNO)", "項次(IT)", "品名(DSR)", "品名2(DSR2)",
+        "數量(QTY1)", "單位(UN1)", "單價(UP)", "金額(AMT)",
+        "相關號碼一(RELNO1)", "相關號碼二(RELNO2)",
+    ]
+
+    for c, h in enumerate(main_headers):
+        ws_main.write(0, c, h, _HDR)
+        ws_main.col(c).width = _col_width(len(h))
+    for c, h in enumerate(detail_headers):
+        ws_detail.write(0, c, h, _HDR)
+        ws_detail.col(c).width = _col_width(len(h))
+
+    total_amount = sum(r.get("amount", 0) for r in rows)
+    tax_amount   = round(total_amount * 0.05)
+
+    main_vals = [
+        invoice_no, _tw_date(invoice_date), _now_time(),
+        total_amount, 1, tax_amount,
+        seller_tax_id, buyer_tax_id,
+        "Z", "", "", 1, "TWD",
+        "", "", "", "", "", "",
+        "", "", "",
+    ]
+    for c, val in enumerate(main_vals):
+        ws_main.write(1, c, val, _DAT)
+
+    for idx, row in enumerate(rows, 1):
+        name = row.get("name", "")
+        spec = row.get("spec", "")
+        dsr  = (name + "　" + spec).strip() if spec else name
+        det_vals = [
+            invoice_no, idx,
+            dsr, row.get("part_no", ""),
+            row.get("qty", 0), "個",
+            row.get("unit_price", 0), row.get("amount", 0),
+            row.get("order_no", ""), row.get("line_no", ""),
+        ]
+        for c, val in enumerate(det_vals):
+            style = _DAT_L if c == 2 else _DAT
+            ws_detail.write(idx, c, val, style)
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
