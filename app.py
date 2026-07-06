@@ -25,7 +25,7 @@ if not chrome_dir.exists():
         check=True
     )
 from rtf_parser import parse_sales_order_rtf
-from lscr_parser import parse_lscr_excel_wb
+from lscr_parser import parse_lscr_excel_wb, expand_lscr_items
 from module_b_invoice import generate_invoice_excel
 from template_engine import (
     analyze_template, analyze_all_sheets,
@@ -799,7 +799,6 @@ with tab_label:
         if _lscr_up:
             _lscr_bytes = _lscr_up.read()
             try:
-                # data_only=True 讀清單值；另開 False 版讀公式模板
                 _wb_data = openpyxl.load_workbook(BytesIO(_lscr_bytes), data_only=True)
                 _wb_tmpl = openpyxl.load_workbook(BytesIO(_lscr_bytes))
 
@@ -808,37 +807,56 @@ with tab_label:
                     st.error(f"此檔案缺少工作表：{', '.join(_missing)}（需要 'list' 和 'lable'）")
                 else:
                     _lscr_orders = parse_lscr_excel_wb(_wb_data)
-                    _lscr_items = [
+                    _lscr_raw_items = [
                         (itm, o)
                         for o in _lscr_orders
                         for itm in o.get("items", [])
                     ]
 
-                    st.success(f"解析完成：{len(_lscr_orders)} 張訂單，共 {len(_lscr_items)} 個品項")
+                    st.success(f"解析完成：{len(_lscr_orders)} 張訂單，共 {len(_lscr_raw_items)} 個品項")
 
+                    # 品項預覽
                     st.dataframe(
                         [{
-                            "PO NO":   o.get("order_no", ""),
-                            "料號":     itm.get("item_no", ""),
-                            "品名":     itm.get("name", ""),
-                            "規格":     itm.get("description", ""),
-                            "數量":     f"{itm.get('quantity', '')}{itm.get('unit', '')}",
-                            "LOT NO":  itm.get("lot_no", ""),
-                            "成品圖號": itm.get("remark", ""),
-                        } for itm, o in _lscr_items],
+                            "PO NO":    o.get("order_no", ""),
+                            "料號":      itm.get("item_no", ""),
+                            "品名":      itm.get("name", ""),
+                            "規格":      itm.get("description", ""),
+                            "總數量":    f"{itm.get('_total_qty','')}{itm.get('_large_unit','PCS')}",
+                            "大包裝":    f"{itm.get('_large_qty','')}{itm.get('_large_unit','PCS')}",
+                            "小包裝":    f"{itm.get('_small_qty','')}{itm.get('_small_unit','PCS')}",
+                            "LOT NO":   itm.get("lot_no", ""),
+                        } for itm, o in _lscr_raw_items],
                         use_container_width=True,
                         hide_index=True,
-                        height=min(420, 38 * (len(_lscr_items) + 1) + 10),
+                        height=min(420, 38 * (len(_lscr_raw_items) + 1) + 10),
                         column_config={
-                            "PO NO":   st.column_config.TextColumn(width="medium"),
-                            "料號":     st.column_config.TextColumn(width="large"),
-                            "品名":     st.column_config.TextColumn(width="small"),
-                            "規格":     st.column_config.TextColumn(width="large"),
-                            "數量":     st.column_config.TextColumn(width="small"),
-                            "LOT NO":  st.column_config.TextColumn(width="medium"),
-                            "成品圖號": st.column_config.TextColumn(width="medium"),
+                            "PO NO":  st.column_config.TextColumn(width="medium"),
+                            "料號":    st.column_config.TextColumn(width="large"),
+                            "品名":    st.column_config.TextColumn(width="medium"),
+                            "規格":    st.column_config.TextColumn(width="large"),
+                            "總數量":  st.column_config.TextColumn(width="small"),
+                            "大包裝":  st.column_config.TextColumn(width="small"),
+                            "小包裝":  st.column_config.TextColumn(width="small"),
+                            "LOT NO": st.column_config.TextColumn(width="medium"),
                         },
                     )
+
+                    # 分裝設定
+                    st.markdown("**標籤設定**")
+                    _lscr_c1, _lscr_c2 = st.columns(2)
+                    with _lscr_c1:
+                        _lscr_small = st.checkbox("印小標籤（小包裝數量）", value=True, key="lscr_small")
+                    with _lscr_c2:
+                        _lscr_large = st.checkbox("印大標籤（總出貨數量）", value=True, key="lscr_large")
+
+                    # 展開後品項數預覽
+                    if _lscr_small or _lscr_large:
+                        _preview_expanded = expand_lscr_items(
+                            _lscr_orders, include_small=_lscr_small, include_large=_lscr_large
+                        )
+                        _n_labels = sum(len(o["items"]) for o in _preview_expanded)
+                        st.caption(f"預計產出 **{_n_labels}** 張標籤（每張佔 2 格並排）")
 
                     if st.button("產出標籤 Excel", type="primary",
                                  use_container_width=True, key="lscr_gen"):
@@ -848,17 +866,18 @@ with tab_label:
                                 if not _lscr_tmpl_info or not _lscr_tmpl_info.get("cells"):
                                     st.error("無法分析 lable 工作表")
                                 else:
-                                    _dyn = [c for c in _lscr_tmpl_info["cells"]
-                                            if c.get("field") != "__fixed__"]
-                                    if not _dyn:
-                                        st.warning("⚠️ lable 工作表未偵測到動態欄位，標籤將只有固定文字")
+                                    _gen_orders = expand_lscr_items(
+                                        _lscr_orders,
+                                        include_small=_lscr_small,
+                                        include_large=_lscr_large,
+                                    )
                                     _pairs = [
                                         {
                                             "order": o,
                                             "template_info": _lscr_tmpl_info,
                                             "template_wb": openpyxl.load_workbook(BytesIO(_lscr_bytes)),
                                         }
-                                        for o in _lscr_orders
+                                        for o in _gen_orders
                                     ]
                                     _buf = generate_labels_multiorder(_pairs)
                                     st.download_button(

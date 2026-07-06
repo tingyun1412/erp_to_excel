@@ -655,8 +655,23 @@ def _extract_logo_images(ws_src) -> list[dict]:
                     rel_row    = anchor._from.row
                     col_letter = get_column_letter(anchor._from.col + 1)
             elif hasattr(anchor, '_from') and hasattr(anchor, 'to'):
-                # TwoCellAnchor 無法可靠定位，跳過避免 logo 跑到錯欄位
-                continue
+                # TwoCellAnchor：用欄寬/列高估算像素尺寸
+                fr = anchor._from.row  # 0-based
+                fc = anchor._from.col
+                tr = anchor.to.row
+                tc = anchor.to.col
+                h_pt = sum(
+                    ws_src.row_dimensions[r].height or 15
+                    for r in range(fr + 1, tr + 2)
+                )
+                h_px = int(h_pt * 96 / 72)
+                w_ch = sum(
+                    ws_src.column_dimensions[get_column_letter(c + 1)].width or 8
+                    for c in range(fc, tc + 1)
+                )
+                w_px = int(w_ch * 7.5)
+                rel_row = fr
+                col_letter = get_column_letter(fc + 1)
             elif isinstance(anchor, str):
                 m = re.match(r'^([A-Za-z]+)(\d+)$', anchor.strip())
                 if m:
