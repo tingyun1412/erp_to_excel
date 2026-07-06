@@ -94,6 +94,7 @@ def _guess_field(value: str) -> str:
         ("批號", "lot_no_inline"),
         ("lot no", "lot_no_inline"), ("lot　no", "lot_no_inline"),
         ("客戶料號", "remark_inline"),
+        ("po no", "customer_order_no_inline"), ("po　no", "customer_order_no_inline"),
     ]:
         if zh in v:
             return key
@@ -123,6 +124,8 @@ def _guess_field_from_label(label: str) -> str:
         "批號": "lot_no_inline",
         "lot no": "lot_no_inline", "lot　no": "lot_no_inline",
         "客戶料號": "remark_inline",
+        "po no": "customer_order_no_inline", "po　no": "customer_order_no_inline",
+        "銷貨單": "order_no_inline", "訂單": "customer_order_no_inline",
     }
     l = label.lower().rstrip("：:")
     for key, val in mapping.items():

@@ -25,6 +25,7 @@ if not chrome_dir.exists():
         check=True
     )
 from rtf_parser import parse_sales_order_rtf
+from lscr_parser import parse_lscr_excel_wb
 from module_b_invoice import generate_invoice_excel
 from template_engine import (
     analyze_template, analyze_all_sheets,
@@ -119,7 +120,7 @@ with tab_label:
     except Exception:
         pass
 
-    sub_tab_use, sub_tab_manage, sub_tab_erp = st.tabs(["產出標籤", "管理模板", "從廠商網站下載標籤"])
+    sub_tab_use, sub_tab_manage, sub_tab_erp, sub_tab_lscr = st.tabs(["產出標籤", "管理模板", "從廠商網站下載標籤", "LSCR 確認單"])
 
     # ── 產出標籤 ──────────────────────────────────────────────
     with sub_tab_use:
@@ -783,6 +784,99 @@ with tab_label:
                             import traceback as _etb
                             st.error(f"ERP 下載失敗：{_ee}")
                             st.code(_etb.format_exc())
+
+
+    # ── LSCR 確認單直接產出 ────────────────────────────────────────
+    with sub_tab_lscr:
+        st.caption("上傳 LSCR 出貨明細確認單（xlsx），自動解析明細並用內建 lable 工作表產出標籤")
+
+        _lscr_up = st.file_uploader(
+            "上傳 LSCR 確認單 xlsx",
+            type=["xlsx"],
+            key="lscr_up",
+        )
+
+        if _lscr_up:
+            _lscr_bytes = _lscr_up.read()
+            try:
+                # data_only=True 讀清單值；另開 False 版讀公式模板
+                _wb_data = openpyxl.load_workbook(BytesIO(_lscr_bytes), data_only=True)
+                _wb_tmpl = openpyxl.load_workbook(BytesIO(_lscr_bytes))
+
+                _missing = [s for s in ("list", "lable") if s not in _wb_data.sheetnames]
+                if _missing:
+                    st.error(f"此檔案缺少工作表：{', '.join(_missing)}（需要 'list' 和 'lable'）")
+                else:
+                    _lscr_orders = parse_lscr_excel_wb(_wb_data)
+                    _lscr_items = [
+                        (itm, o)
+                        for o in _lscr_orders
+                        for itm in o.get("items", [])
+                    ]
+
+                    st.success(f"解析完成：{len(_lscr_orders)} 張訂單，共 {len(_lscr_items)} 個品項")
+
+                    st.dataframe(
+                        [{
+                            "PO NO":   o.get("order_no", ""),
+                            "料號":     itm.get("item_no", ""),
+                            "品名":     itm.get("name", ""),
+                            "規格":     itm.get("description", ""),
+                            "數量":     f"{itm.get('quantity', '')}{itm.get('unit', '')}",
+                            "LOT NO":  itm.get("lot_no", ""),
+                            "成品圖號": itm.get("remark", ""),
+                        } for itm, o in _lscr_items],
+                        use_container_width=True,
+                        hide_index=True,
+                        height=min(420, 38 * (len(_lscr_items) + 1) + 10),
+                        column_config={
+                            "PO NO":   st.column_config.TextColumn(width="medium"),
+                            "料號":     st.column_config.TextColumn(width="large"),
+                            "品名":     st.column_config.TextColumn(width="small"),
+                            "規格":     st.column_config.TextColumn(width="large"),
+                            "數量":     st.column_config.TextColumn(width="small"),
+                            "LOT NO":  st.column_config.TextColumn(width="medium"),
+                            "成品圖號": st.column_config.TextColumn(width="medium"),
+                        },
+                    )
+
+                    if st.button("產出標籤 Excel", type="primary",
+                                 use_container_width=True, key="lscr_gen"):
+                        with st.spinner("產出中..."):
+                            try:
+                                _lscr_tmpl_info = analyze_template(_wb_tmpl, "lable")
+                                if not _lscr_tmpl_info or not _lscr_tmpl_info.get("cells"):
+                                    st.error("無法分析 lable 工作表")
+                                else:
+                                    _dyn = [c for c in _lscr_tmpl_info["cells"]
+                                            if c.get("field") != "__fixed__"]
+                                    if not _dyn:
+                                        st.warning("⚠️ lable 工作表未偵測到動態欄位，標籤將只有固定文字")
+                                    _pairs = [
+                                        {
+                                            "order": o,
+                                            "template_info": _lscr_tmpl_info,
+                                            "template_wb": openpyxl.load_workbook(BytesIO(_lscr_bytes)),
+                                        }
+                                        for o in _lscr_orders
+                                    ]
+                                    _buf = generate_labels_multiorder(_pairs)
+                                    st.download_button(
+                                        "⬇️ 下載標籤.xlsx",
+                                        data=_buf,
+                                        file_name="LSCR標籤.xlsx",
+                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                        use_container_width=True,
+                                    )
+                            except Exception as _le:
+                                import traceback as _ltb
+                                st.error(f"產出失敗：{_le}")
+                                st.code(_ltb.format_exc())
+
+            except Exception as _lscr_e:
+                st.error(f"解析失敗：{_lscr_e}")
+                import traceback as _ltb2
+                st.code(_ltb2.format_exc())
 
 
 # ════════════════════════════════════════════════════════════════
