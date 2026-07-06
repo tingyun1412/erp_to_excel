@@ -877,10 +877,21 @@ def write_lscr_labels(
     ws_out = wb_out.active
     ws_out.title = "Labels"
 
-    # 3 個 slot 的欄寬（固定 24.5，避免 LOGO 蓋住文字）
+    # 欄寬：從 template 讀取（內容欄 + 間距欄），還原原始版面
     for ui in range(3):
+        # 內容欄
         for c_off in range(columns_per_unit):
-            ws_out.column_dimensions[get_column_letter(ui * unit_width + c_off + 1)].width = 24.5
+            tmpl_letter = get_column_letter(first_unit_start_col + c_off)
+            w = ws_tmpl.column_dimensions[tmpl_letter].width \
+                if tmpl_letter in ws_tmpl.column_dimensions else 23.5
+            ws_out.column_dimensions[get_column_letter(ui * unit_width + c_off + 1)].width = w
+        # 間距欄（slot 之間）
+        for g in range(gap_cols):
+            gap_tmpl_letter = get_column_letter(first_unit_start_col + columns_per_unit + g)
+            gw = ws_tmpl.column_dimensions[gap_tmpl_letter].width \
+                 if gap_tmpl_letter in ws_tmpl.column_dimensions else 3
+            out_gap_col = ui * unit_width + columns_per_unit + g + 1
+            ws_out.column_dimensions[get_column_letter(out_gap_col)].width = gw
 
     unit_merges = [
         m for m in ws_tmpl.merged_cells.ranges
