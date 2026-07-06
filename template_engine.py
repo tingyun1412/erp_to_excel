@@ -881,7 +881,7 @@ def write_lscr_labels(
     for ui in range(3):
         # 內容欄
         for c_off in range(columns_per_unit):
-            ws_out.column_dimensions[get_column_letter(ui * unit_width + c_off + 1)].width = 24.5
+            ws_out.column_dimensions[get_column_letter(ui * unit_width + c_off + 1)].width = 25
         # 間距欄（slot 之間）
         for g in range(gap_cols):
             gap_tmpl_letter = get_column_letter(first_unit_start_col + columns_per_unit + g)
