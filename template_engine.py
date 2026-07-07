@@ -976,10 +976,10 @@ def write_lscr_labels(
     for br in range(block, last_row + 1, block):
         ws_out.row_breaks.append(_Break(id=br))
 
-    # 紙張大小 = 標籤實際尺寸 106×40mm
-    ws_out.page_setup.paperWidth  = "106mm"
-    ws_out.page_setup.paperHeight = "40mm"
-    ws_out.page_setup.orientation = 'portrait'
+    # 紙張大小：直向底值 40×106mm，landscape 旋轉後 = 106mm 寬 × 40mm 高
+    ws_out.page_setup.paperWidth  = "40mm"
+    ws_out.page_setup.paperHeight = "106mm"
+    ws_out.page_setup.orientation = 'landscape'
     ws_out.page_margins = _PageMargins(
         left=0.2, right=0.04, top=0.04, bottom=0.04, header=0, footer=0
     )
