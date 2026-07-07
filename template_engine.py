@@ -933,9 +933,10 @@ def write_lscr_labels(
             one_box = (small_q >= total or total == 0)
 
             # 固定列高（TSC TTP-246M Plus 設定）
-            ws_out.row_dimensions[current_row].height = 15
+            # 8列總高 14.8+7×14.0=112.8pt=39.8mm，留 0.2mm 緩衝不超出 40mm 標籤
+            ws_out.row_dimensions[current_row].height = 14.8
             for r_off in range(1, unit_rows):
-                ws_out.row_dimensions[current_row + r_off].height = 14.2
+                ws_out.row_dimensions[current_row + r_off].height = 14.0
 
             if one_box:
                 if include_small or include_large:
@@ -981,7 +982,7 @@ def write_lscr_labels(
     ws_out.page_setup.paperHeight = "40mm"
     ws_out.page_setup.orientation = 'landscape'
     ws_out.page_margins = _PageMargins(
-        left=0.04, right=0.04, top=0.04, bottom=0.04, header=0, footer=0
+        left=0.2, right=0.04, top=0.04, bottom=0.04, header=0, footer=0
     )
     ws_out.page_setup.fitToPage   = False
 
