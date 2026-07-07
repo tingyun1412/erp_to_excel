@@ -876,12 +876,11 @@ def write_lscr_labels(
 
     # 固定欄寬（符合 TSC TTP-246M Plus 標籤機設定）
     # A=小標1, B=間距, C=小標2, D=間距, E=大標
-    # 29 char × MDW≈6.5 ≈ 50mm；A+B+C≈102mm ≈ 106mm 紙寬，減少跨機器 MDW 差異
-    ws_out.column_dimensions["A"].width = 29
+    ws_out.column_dimensions["A"].width = 25
     ws_out.column_dimensions["B"].width = 2.45
-    ws_out.column_dimensions["C"].width = 29
+    ws_out.column_dimensions["C"].width = 25
     ws_out.column_dimensions["D"].width = 2.45
-    ws_out.column_dimensions["E"].width = 29
+    ws_out.column_dimensions["E"].width = 25
 
     unit_merges = [
         m for m in ws_tmpl.merged_cells.ranges
@@ -977,16 +976,14 @@ def write_lscr_labels(
     for br in range(block, last_row + 1, block):
         ws_out.row_breaks.append(_Break(id=br))
 
-    # 紙張大小：直向底值 40×106mm，landscape 旋轉後 = 106mm 寬 × 40mm 高
-    ws_out.page_setup.paperWidth  = "40mm"
-    ws_out.page_setup.paperHeight = "106mm"
+    # 紙張大小：106×40mm landscape（與參考檔 LSCR標籤(8).xlsx 相同）
+    ws_out.page_setup.paperWidth  = "106mm"
+    ws_out.page_setup.paperHeight = "40mm"
     ws_out.page_setup.orientation = 'landscape'
     ws_out.page_margins = _PageMargins(
-        left=0.2, right=0.04, top=0.04, bottom=0.04, header=0, footer=0
+        left=0.04, right=0.04, top=0.04, bottom=0.04, header=0, footer=0
     )
-    ws_out.page_setup.fitToPage   = True
-    ws_out.page_setup.fitToWidth  = 1
-    ws_out.page_setup.fitToHeight = 0
+    ws_out.page_setup.fitToPage   = False
 
     buf = BytesIO()
     wb_out.save(buf)
