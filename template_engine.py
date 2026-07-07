@@ -992,6 +992,28 @@ def write_lscr_labels(
 
             global_seq += len(smalls) + (1 if large_item else 0)
 
+    # ── 列印版面設定 ──────────────────────────────────────────────
+    from openpyxl.worksheet.pagebreak import Break as _Break
+    from openpyxl.worksheet.page import PageMargins as _PageMargins
+
+    last_row = current_row - 1
+    # 列印範圍：A1 到第三個 slot 的最後內容欄（col E = 2*unit_width+1）
+    print_last_col = get_column_letter(2 * unit_width + columns_per_unit)
+    ws_out.print_area = f"A1:{print_last_col}{last_row}"
+
+    # 每個品項後插入分頁（每 unit_rows+1 列一頁）
+    block = unit_rows + 1
+    for br in range(block, last_row + 1, block):
+        ws_out.row_breaks.append(_Break(id=br))
+
+    ws_out.page_setup.orientation = 'landscape'
+    ws_out.page_margins = _PageMargins(
+        left=0.1, right=0.1, top=0.1, bottom=0.1, header=0, footer=0
+    )
+    ws_out.page_setup.fitToPage = True
+    ws_out.page_setup.fitToWidth = 1
+    ws_out.page_setup.fitToHeight = 0
+
     buf = BytesIO()
     wb_out.save(buf)
     buf.seek(0)
