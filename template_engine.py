@@ -979,7 +979,7 @@ def write_lscr_labels(
     # 紙張大小 = 標籤實際尺寸 106×40mm
     ws_out.page_setup.paperWidth  = "106mm"
     ws_out.page_setup.paperHeight = "40mm"
-    ws_out.page_setup.orientation = 'landscape'
+    ws_out.page_setup.orientation = 'portrait'
     ws_out.page_margins = _PageMargins(
         left=0.04, right=0.04, top=0.04, bottom=0.04, header=0, footer=0
     )
