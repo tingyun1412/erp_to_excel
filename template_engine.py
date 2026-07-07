@@ -953,7 +953,7 @@ def write_lscr_labels(
             # Logo（模板 col A + col C 各一個，直接複製到對應列）
             _copy_passthrough_images(ws_out, ws_tmpl, unit_rows, current_row)
 
-            current_row += unit_rows + 1
+            current_row += unit_rows  # 不加空白分隔列，每頁剛好 8 列
             global_seq  += 1
 
     # ── 列印版面設定 ──────────────────────────────────────────────
@@ -963,17 +963,19 @@ def write_lscr_labels(
     last_row = current_row - 1
     ws_out.print_area = f"A1:C{last_row}"
 
-    block = unit_rows + 1
+    # 每個標籤 unit_rows 列為一頁
+    block = unit_rows
     for br in range(block, last_row + 1, block):
         ws_out.row_breaks.append(_Break(id=br))
 
+    # 紙張大小 = 標籤實際尺寸 106×40mm
+    ws_out.page_setup.paperWidth  = "106mm"
+    ws_out.page_setup.paperHeight = "40mm"
     ws_out.page_setup.orientation = 'landscape'
     ws_out.page_margins = _PageMargins(
-        left=0.1, right=0.1, top=0.1, bottom=0.1, header=0, footer=0
+        left=0.04, right=0.04, top=0.04, bottom=0.04, header=0, footer=0
     )
-    ws_out.page_setup.fitToPage = True
-    ws_out.page_setup.fitToWidth = 1
-    ws_out.page_setup.fitToHeight = 0
+    ws_out.page_setup.fitToPage   = False
 
     buf = BytesIO()
     wb_out.save(buf)
