@@ -970,7 +970,6 @@ def write_lscr_labels(
     from openpyxl.worksheet.page import PageMargins as _PageMargins
 
     last_row = current_row - 1
-    ws_out.print_area = f"A1:E{last_row}"
 
     # 每個標籤 unit_rows 列為一頁
     block = unit_rows
@@ -984,7 +983,10 @@ def write_lscr_labels(
     ws_out.page_margins = _PageMargins(
         left=0.04, right=0.04, top=0.04, bottom=0.04, header=0, footer=0
     )
-    ws_out.page_setup.fitToPage   = False
+    # fitToWidth=1：列印時自動撐滿 106mm，不受各機器 MDW 影響
+    ws_out.page_setup.fitToPage   = True
+    ws_out.page_setup.fitToWidth  = 1
+    ws_out.page_setup.fitToHeight = 0
 
     buf = BytesIO()
     wb_out.save(buf)
