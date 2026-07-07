@@ -981,7 +981,7 @@ def write_lscr_labels(
     ws_out.page_setup.paperHeight = "40mm"
     ws_out.page_setup.orientation = 'portrait'
     ws_out.page_margins = _PageMargins(
-        left=0.1, right=0.1, top=0.1, bottom=0.1, header=0, footer=0
+        left=0.2, right=0.04, top=0.04, bottom=0.04, header=0, footer=0
     )
     # fitToWidth=1：列印時自動撐滿 106mm，不受各機器 MDW 影響
     ws_out.page_setup.fitToPage   = True
