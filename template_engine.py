@@ -876,11 +876,11 @@ def write_lscr_labels(
 
     # 固定欄寬（符合 TSC TTP-246M Plus 標籤機設定）
     # A=小標1, B=間距, C=小標2, D=間距, E=大標
-    ws_out.column_dimensions["A"].width = 22.8
+    ws_out.column_dimensions["A"].width = 24.5
     ws_out.column_dimensions["B"].width = 2.45
-    ws_out.column_dimensions["C"].width = 22.8
+    ws_out.column_dimensions["C"].width = 24.5
     ws_out.column_dimensions["D"].width = 2.45
-    ws_out.column_dimensions["E"].width = 22.8
+    ws_out.column_dimensions["E"].width = 24.5
 
     unit_merges = [
         m for m in ws_tmpl.merged_cells.ranges
