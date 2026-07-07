@@ -854,14 +854,11 @@ def write_lscr_labels(
     include_large: bool = True,
 ) -> BytesIO:
     """
-    LSCR 專用排版：小標籤兩張並排，大標籤置於第一列第三欄。
-    每個品項：
-      列 1：[小 0][小 1][大]
-      列 2：[小 2][小 3]
-      …
+    LSCR 專用排版（TSC TTP-246M Plus）：
+      每個品項一列：[小標籤 col A] [大標籤 col C]
+      欄寬：A=C=22.8，B=2.45
+      列高：第1列=15pt，第2–8列=14.2pt
     """
-    import math
-
     ws_tmpl = wb_tmpl["lable"]
 
     unit_rows            = tmpl_info["unit_rows"]
@@ -870,25 +867,16 @@ def write_lscr_labels(
     first_unit_start_col = tmpl_info.get("first_unit_start_col", 1)
     data_cells = [c for c in tmpl_info["cells"]
                   if not c.get("is_header") and c.get("field", "__fixed__") != "__fixed__"]
-    row_heights  = tmpl_info.get("row_heights", {})
-    unit_width   = columns_per_unit + gap_cols  # 每個 slot 的欄數（含間距）
+    unit_width = columns_per_unit + gap_cols  # 欄A + 間距欄B = 2
 
     wb_out = openpyxl.Workbook()
     ws_out = wb_out.active
     ws_out.title = "Labels"
 
-    # 欄寬：從 template 讀取（內容欄 + 間距欄），還原原始版面
-    for ui in range(3):
-        # 內容欄
-        for c_off in range(columns_per_unit):
-            ws_out.column_dimensions[get_column_letter(ui * unit_width + c_off + 1)].width = 25
-        # 間距欄（slot 之間）
-        for g in range(gap_cols):
-            gap_tmpl_letter = get_column_letter(first_unit_start_col + columns_per_unit + g)
-            gw = ws_tmpl.column_dimensions[gap_tmpl_letter].width \
-                 if gap_tmpl_letter in ws_tmpl.column_dimensions else 3
-            out_gap_col = ui * unit_width + columns_per_unit + g + 1
-            ws_out.column_dimensions[get_column_letter(out_gap_col)].width = gw
+    # 固定欄寬（符合 TSC TTP-246M Plus 標籤機設定）
+    ws_out.column_dimensions["A"].width = 22.8
+    ws_out.column_dimensions["B"].width = 2.45
+    ws_out.column_dimensions["C"].width = 22.8
 
     unit_merges = [
         m for m in ws_tmpl.merged_cells.ranges
@@ -905,14 +893,11 @@ def write_lscr_labels(
                 if src.value is not None:
                     dst.value = src.value
                 try:
-                    if src.font:
-                        dst.font = copy.copy(src.font)
+                    if src.font:      dst.font      = copy.copy(src.font)
                     if src.fill and getattr(src.fill, 'fill_type', None) not in (None, 'none'):
                         dst.fill = copy.copy(src.fill)
-                    if src.border:
-                        dst.border = copy.copy(src.border)
-                    if src.alignment:
-                        dst.alignment = copy.copy(src.alignment)
+                    if src.border:    dst.border    = copy.copy(src.border)
+                    if src.alignment: dst.alignment = copy.copy(src.alignment)
                 except Exception:
                     pass
         for m in unit_merges:
@@ -943,65 +928,41 @@ def write_lscr_labels(
             large_u = phys_item.get("_large_unit", "PCS")
             one_box = (small_q >= total or total == 0)
 
-            smalls     = []
-            large_item = None
+            # 固定列高（TSC TTP-246M Plus 設定）
+            ws_out.row_dimensions[current_row].height = 15
+            for r_off in range(1, unit_rows):
+                ws_out.row_dimensions[current_row + r_off].height = 14.2
+
             if one_box:
                 if include_small or include_large:
-                    smalls = [dict(phys_item)]
+                    _write_slot(dict(phys_item), order, global_seq, 0, current_row)
             else:
+                # 左欄（A）：小標籤
                 if include_small:
-                    for _ in range(2):
-                        s = dict(phys_item)
-                        s["quantity"] = str(int(small_q))
-                        s["unit"]     = small_u
-                        smalls.append(s)
+                    s = dict(phys_item)
+                    s["quantity"] = str(int(small_q))
+                    s["unit"]     = small_u
+                    _write_slot(s, order, global_seq, 0, current_row)
+                # 右欄（C）：大標籤
                 if include_large:
-                    large_item = dict(phys_item)
-                    large_item["quantity"] = str(int(large_q))
-                    large_item["unit"]     = large_u
+                    l = dict(phys_item)
+                    l["quantity"] = str(int(large_q))
+                    l["unit"]     = large_u
+                    _write_slot(l, order, global_seq, 1, current_row)
 
-            n_small_rows = math.ceil(len(smalls) / 2) if smalls else 0
-            n_rows       = max(n_small_rows, 1 if large_item else 0)
+            # Logo（模板 col A + col C 各一個，直接複製到對應列）
+            _copy_passthrough_images(ws_out, ws_tmpl, unit_rows, current_row)
 
-            for row_idx in range(n_rows):
-                for ri_str, h in row_heights.items():
-                    if h is not None:
-                        ws_out.row_dimensions[current_row + int(ri_str) - 1].height = h + 2
-
-                si0 = row_idx * 2
-                if si0 < len(smalls):
-                    _write_slot(smalls[si0], order, global_seq + si0, 0, current_row)
-
-                si1 = row_idx * 2 + 1
-                if si1 < len(smalls):
-                    _write_slot(smalls[si1], order, global_seq + si1, 1, current_row)
-
-                if row_idx == 0 and large_item:
-                    _write_slot(large_item, order, global_seq + len(smalls), 2, current_row)
-
-                # 複製 logo（slot 0 和 1：col A、col C）
-                _copy_passthrough_images(ws_out, ws_tmpl, unit_rows, current_row)
-                # 複製 logo（slot 2 大標籤：只取 col A 圖片，平移到第三欄）
-                if row_idx == 0 and large_item:
-                    _copy_passthrough_images(
-                        ws_out, ws_tmpl, unit_rows, current_row,
-                        col_offset=2 * unit_width, only_cols={0},
-                    )
-
-                current_row += unit_rows + 1
-
-            global_seq += len(smalls) + (1 if large_item else 0)
+            current_row += unit_rows + 1
+            global_seq  += 1
 
     # ── 列印版面設定 ──────────────────────────────────────────────
     from openpyxl.worksheet.pagebreak import Break as _Break
     from openpyxl.worksheet.page import PageMargins as _PageMargins
 
     last_row = current_row - 1
-    # 列印範圍：A1 到第三個 slot 的最後內容欄（col E = 2*unit_width+1）
-    print_last_col = get_column_letter(2 * unit_width + columns_per_unit)
-    ws_out.print_area = f"A1:{print_last_col}{last_row}"
+    ws_out.print_area = f"A1:C{last_row}"
 
-    # 每個品項後插入分頁（每 unit_rows+1 列一頁）
     block = unit_rows + 1
     for br in range(block, last_row + 1, block):
         ws_out.row_breaks.append(_Break(id=br))
