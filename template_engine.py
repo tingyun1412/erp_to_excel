@@ -950,8 +950,7 @@ def write_lscr_labels(
                     smalls = [dict(phys_item)]
             else:
                 if include_small:
-                    n = math.ceil(total / small_q)
-                    for _ in range(n):
+                    for _ in range(2):
                         s = dict(phys_item)
                         s["quantity"] = str(int(small_q))
                         s["unit"]     = small_u
