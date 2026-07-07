@@ -855,8 +855,9 @@ def write_lscr_labels(
 ) -> BytesIO:
     """
     LSCR 專用排版（TSC TTP-246M Plus）：
-      每個品項一列：[小標籤 col A] [大標籤 col C]
-      欄寬：A=C=22.8，B=2.45
+      每個品項一列：[小標1 col A][小標2 col C][大標 col E]
+      列印時自行選範圍：小標 A:C，大標 E:E
+      欄寬：A=C=E=22.8，B=D=2.45
       列高：第1列=15pt，第2–8列=14.2pt
     """
     ws_tmpl = wb_tmpl["lable"]
@@ -874,9 +875,12 @@ def write_lscr_labels(
     ws_out.title = "Labels"
 
     # 固定欄寬（符合 TSC TTP-246M Plus 標籤機設定）
+    # A=小標1, B=間距, C=小標2, D=間距, E=大標
     ws_out.column_dimensions["A"].width = 22.8
     ws_out.column_dimensions["B"].width = 2.45
     ws_out.column_dimensions["C"].width = 22.8
+    ws_out.column_dimensions["D"].width = 2.45
+    ws_out.column_dimensions["E"].width = 22.8
 
     unit_merges = [
         m for m in ws_tmpl.merged_cells.ranges
@@ -936,22 +940,27 @@ def write_lscr_labels(
             if one_box:
                 if include_small or include_large:
                     _write_slot(dict(phys_item), order, global_seq, 0, current_row)
+                    _write_slot(dict(phys_item), order, global_seq, 1, current_row)
+                    _write_slot(dict(phys_item), order, global_seq, 2, current_row)
             else:
-                # 左欄（A）：小標籤
+                # 左欄（A）：小標籤 1
                 if include_small:
                     s = dict(phys_item)
                     s["quantity"] = str(int(small_q))
                     s["unit"]     = small_u
                     _write_slot(s, order, global_seq, 0, current_row)
-                # 右欄（C）：大標籤
+                    _write_slot(s, order, global_seq, 1, current_row)
+                # 右欄（E）：大標籤
                 if include_large:
                     l = dict(phys_item)
                     l["quantity"] = str(int(large_q))
                     l["unit"]     = large_u
-                    _write_slot(l, order, global_seq, 1, current_row)
+                    _write_slot(l, order, global_seq, 2, current_row)
 
-            # Logo（模板 col A + col C 各一個，直接複製到對應列）
+            # Logo：小標1(A) + 小標2(C) 直接複製，大標(E) 用 col_offset=4 只取第0欄圖片
             _copy_passthrough_images(ws_out, ws_tmpl, unit_rows, current_row)
+            _copy_passthrough_images(ws_out, ws_tmpl, unit_rows, current_row,
+                                     col_offset=2 * unit_width, only_cols={0})
 
             current_row += unit_rows  # 不加空白分隔列，每頁剛好 8 列
             global_seq  += 1
@@ -961,7 +970,7 @@ def write_lscr_labels(
     from openpyxl.worksheet.page import PageMargins as _PageMargins
 
     last_row = current_row - 1
-    ws_out.print_area = f"A1:C{last_row}"
+    ws_out.print_area = f"A1:E{last_row}"
 
     # 每個標籤 unit_rows 列為一頁
     block = unit_rows
