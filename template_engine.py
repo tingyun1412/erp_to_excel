@@ -283,12 +283,16 @@ def analyze_template(wb: openpyxl.Workbook, sheet_name: str) -> dict:
     for _c in list(cells_info):
         if not _c["field"].endswith("_inline"):
             continue
-        # 純標籤：值以「：」結尾且後面沒有任何資料
-        if re.match(r'^[^：:]+[：:]\s*$', _c["value"]):
+        # 純標籤格判斷：
+        #   (a) 值以「：」結尾（"料號："）
+        #   (b) 值完全不含「：」 且右格存在 ("料號" → 右格為值格)
+        is_colon_label = bool(re.match(r'^[^：:]+[：:]\s*$', _c["value"]))
+        _adj = _cell_map.get((_c["row"], _c["col"] + 1))
+        is_plain_label = (not re.search(r'[：:]', _c["value"])) and bool(_adj)
+        if is_colon_label or is_plain_label:
             _direct = _INLINE_TO_DIRECT.get(_c["field"])
             if _direct:
                 _c["field"] = "__fixed__"   # 標籤格固定不填值
-                _adj = _cell_map.get((_c["row"], _c["col"] + 1))
                 if _adj and _adj["field"] == "__fixed__":
                     _adj["field"] = _direct  # 相鄰值格標為動態欄位
 
