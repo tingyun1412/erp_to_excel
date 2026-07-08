@@ -86,11 +86,14 @@ def _guess_field(value: str) -> str:
 
     # inline 格式（"料號：xxx"）
     for zh, key in [
+        ("廠商料號", "item_no_inline"), ("廠商品號", "item_no_inline"),
         ("料號", "item_no_inline"), ("品號", "item_no_inline"),
-        ("品名", "name_inline"),
+        ("廠商品名", "name_inline"), ("品名", "name_inline"),
         ("規格", "description_inline"),
         ("數量", "quantity_inline"),
         ("出貨日期", "ship_date_inline"), ("出廠日期", "ship_date_inline"),
+        ("出交貨期", "ship_date_inline"), ("出交報驗日", "ship_date_inline"),
+        ("出貨日", "ship_date_inline"),
         ("批號", "lot_no_inline"),
         ("lot no", "lot_no_inline"), ("lot　no", "lot_no_inline"),
         ("客戶料號", "remark_inline"),
@@ -116,11 +119,13 @@ def _guess_field(value: str) -> str:
 def _guess_field_from_label(label: str) -> str:
     """從公式的前綴標籤（"料號："）猜欄位"""
     mapping = {
+        "廠商料號": "item_no_inline", "廠商品號": "item_no_inline",
         "料號": "item_no_inline", "品號": "item_no_inline",
-        "品名": "name_inline",
+        "廠商品名": "name_inline", "品名": "name_inline",
         "規格": "description_inline",
         "數量": "quantity_inline",
         "出貨日期": "ship_date_inline", "出廠日期": "ship_date_inline",
+        "出交貨期": "ship_date_inline", "出交報驗日": "ship_date_inline",
         "批號": "lot_no_inline",
         "lot no": "lot_no_inline", "lot　no": "lot_no_inline",
         "客戶料號": "remark_inline",
@@ -266,6 +271,27 @@ def analyze_template(wb: openpyxl.Workbook, sheet_name: str) -> dict:
                 cell = ws.cell(row=row_idx, column=col_idx)
                 _add_cell(cell, row_idx, col_offset + 1)
 
+    # KV-pair 後處理：將純標籤格改為 __fixed__，相鄰的值格改為正確動態欄位
+    _INLINE_TO_DIRECT = {
+        "item_no_inline": "item_no", "name_inline": "name",
+        "description_inline": "description", "quantity_inline": "quantity",
+        "ship_date_inline": "ship_date", "lot_no_inline": "lot_no",
+        "remark_inline": "remark", "customer_order_no_inline": "customer_order_no",
+        "order_no_inline": "order_no",
+    }
+    _cell_map = {(c["row"], c["col"]): c for c in cells_info}
+    for _c in list(cells_info):
+        if not _c["field"].endswith("_inline"):
+            continue
+        # 純標籤：值以「：」結尾且後面沒有任何資料
+        if re.match(r'^[^：:]+[：:]\s*$', _c["value"]):
+            _direct = _INLINE_TO_DIRECT.get(_c["field"])
+            if _direct:
+                _c["field"] = "__fixed__"   # 標籤格固定不填值
+                _adj = _cell_map.get((_c["row"], _c["col"] + 1))
+                if _adj and _adj["field"] == "__fixed__":
+                    _adj["field"] = _direct  # 相鄰值格標為動態欄位
+
     # 欄寬和行高
     col_widths = {}
     for i, col_idx in enumerate(first_unit_cols):
@@ -301,25 +327,42 @@ def _detect_unit_rows(ws, first_unit_cols: list[int], max_row: int) -> int:
     比對方式：將各欄位值去除數字後比較（樣本數值不同不影響結構比對）。
     若找不到週期，回傳 max_row（整張 sheet = 一個標籤）。
     最短週期設為 3，避免誤偵測。
+    支援 KEY:VALUE pair 格式（如嘜頭.xlsx）：
+      - 若首欄多數值以「：」結尾，使用首欄做週期偵測（忽略 VALUE 欄內容差異）
     """
     _NUM = re.compile(r'[\d.,]+')
+
+    # 偵測 KV-pair 模式：首欄有大量「xxxx：」樣式的 KEY cell
+    key_col = first_unit_cols[0]
+    key_vals = [str(ws.cell(row=r, column=key_col).value or "") for r in range(1, max_row + 1)]
+    kv_ratio = sum(1 for k in key_vals if k.strip().endswith(("：", ":"))) / max(max_row, 1)
+    detect_cols = [key_col] if kv_ratio >= 0.2 else first_unit_cols
 
     def row_key(r: int) -> tuple:
         return tuple(
             _NUM.sub('', str(ws.cell(row=r, column=c).value or '')).strip()
-            for c in first_unit_cols
+            for c in detect_cols
         )
 
     keys = [row_key(r) for r in range(1, max_row + 1)]
-    k0 = keys[0]
+
+    # 找第一個非空行作為基準（嘜頭格式第一列可能是空白）
+    start = 0
+    for i, k in enumerate(keys):
+        if any(k):
+            start = i
+            break
+    k0 = keys[start]
     if not any(k0):
         return max_row
 
-    for p in range(3, max_row // 2 + 1):
-        if keys[p] != k0:
+    for p in range(3, (max_row - start) // 2 + 1):
+        if start + p >= len(keys):
+            break
+        if keys[start + p] != k0:
             continue
-        if all(keys[off] == keys[p + off]
-               for off in range(p) if p + off < len(keys)):
+        if all(keys[start + off] == keys[start + p + off]
+               for off in range(p) if start + p + off < len(keys)):
             return p
 
     return max_row
