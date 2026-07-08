@@ -745,6 +745,59 @@ with tab_label:
                             _success = {no: d for no, d in _results.items() if d}
                             _failed  = [no for no, d in _results.items() if not d]
 
+                            def _pdf_to_combined_b64(pdf_bytes: bytes, dpi: int = 150) -> str:
+                                """把 PDF 所有頁面垂直合併成一張 PNG，回傳 base64"""
+                                import fitz as _fitz
+                                import base64 as _b64
+                                from PIL import Image as _PILImage
+                                _doc = _fitz.open(stream=pdf_bytes, filetype="pdf")
+                                _imgs = [
+                                    _PILImage.frombytes(
+                                        "RGB",
+                                        [_p.width, _p.height],
+                                        _p.samples,
+                                    )
+                                    for _p in (_doc[i].get_pixmap(dpi=dpi) for i in range(len(_doc)))
+                                ]
+                                _w = max(im.width for im in _imgs)
+                                _h = sum(im.height for im in _imgs)
+                                _combined = _PILImage.new("RGB", (_w, _h), "white")
+                                _y = 0
+                                for im in _imgs:
+                                    _combined.paste(im, (0, _y))
+                                    _y += im.height
+                                _buf = BytesIO()
+                                _combined.save(_buf, format="PNG")
+                                return _b64.b64encode(_buf.getvalue()).decode()
+
+                            def _copy_button_html(b64: str, btn_id: str, label: str) -> str:
+                                return f"""
+<button id="{btn_id}" onclick="copyLabel_{btn_id}()" style="
+    background:#0068c9;color:white;border:none;border-radius:6px;
+    padding:8px 0;font-size:15px;cursor:pointer;width:100%;margin-top:4px">
+    {label}
+</button>
+<div id="toast_{btn_id}" style="display:none;margin-top:6px;padding:8px;
+    background:#21c354;color:white;border-radius:6px;text-align:center;font-size:14px">
+    ✓ 已複製！可直接貼上到 Codex
+</div>
+<script>
+async function copyLabel_{btn_id}(){{
+    try{{
+        const blob=await fetch('data:image/png;base64,{b64}').then(r=>r.blob());
+        await navigator.clipboard.write([new ClipboardItem({{'image/png':blob}})]);
+        document.getElementById('toast_{btn_id}').style.display='block';
+        document.getElementById('{btn_id}').textContent='✓ 已複製';
+        document.getElementById('{btn_id}').style.background='#21c354';
+        setTimeout(()=>{{
+            document.getElementById('toast_{btn_id}').style.display='none';
+            document.getElementById('{btn_id}').textContent='{label}';
+            document.getElementById('{btn_id}').style.background='#0068c9';
+        }},2500);
+    }}catch(e){{alert('複製失敗：'+e.message);}}
+}}
+</script>"""
+
                             if _success:
                                 if len(_success) == 1:
                                     _ono, _pdf = next(iter(_success.items()))
@@ -754,45 +807,17 @@ with tab_label:
                                         file_name=f"標籤_{_ono}.pdf",
                                         mime="application/pdf",
                                     )
-                                    # 標籤預覽 + 複製截圖
                                     try:
-                                        import fitz as _fitz
-                                        import base64 as _b64
-                                        _doc = _fitz.open(stream=_pdf, filetype="pdf")
-                                        _pix = _doc[0].get_pixmap(dpi=150)
-                                        _png_b64 = _b64.b64encode(_pix.tobytes("png")).decode()
+                                        _b64str = _pdf_to_combined_b64(_pdf)
                                         st.image(
-                                            BytesIO(_b64.b64decode(_png_b64)),
-                                            caption=f"標籤預覽：{_ono}",
+                                            BytesIO(__import__('base64').b64decode(_b64str)),
+                                            caption=f"標籤預覽（全頁）：{_ono}",
                                             use_container_width=True,
                                         )
-                                        st.components.v1.html(f"""
-<button id="cpbtn" onclick="copyLabel()" style="
-    background:#0068c9;color:white;border:none;border-radius:6px;
-    padding:8px 0;font-size:15px;cursor:pointer;width:100%;margin-top:4px">
-    複製截圖
-</button>
-<div id="toast" style="display:none;margin-top:6px;padding:8px;
-    background:#21c354;color:white;border-radius:6px;text-align:center;font-size:14px">
-    ✓ 已複製！可直接貼上到 Codex
-</div>
-<script>
-async function copyLabel(){{
-    try{{
-        const blob=await fetch('data:image/png;base64,{_png_b64}').then(r=>r.blob());
-        await navigator.clipboard.write([new ClipboardItem({{'image/png':blob}})]);
-        document.getElementById('toast').style.display='block';
-        document.getElementById('cpbtn').textContent='✓ 已複製';
-        document.getElementById('cpbtn').style.background='#21c354';
-        setTimeout(()=>{{
-            document.getElementById('toast').style.display='none';
-            document.getElementById('cpbtn').textContent='複製截圖';
-            document.getElementById('cpbtn').style.background='#0068c9';
-        }},2500);
-    }}catch(e){{alert('複製失敗：'+e.message);}}
-}}
-</script>
-""", height=100)
+                                        st.components.v1.html(
+                                            _copy_button_html(_b64str, "cp_single", "複製截圖"),
+                                            height=100,
+                                        )
                                     except Exception as _pe:
                                         st.warning(f"無法產生預覽：{_pe}")
                                 else:
@@ -804,46 +829,19 @@ async function copyLabel(){{
                                         mime="application/zip",
                                         use_container_width=True,
                                     )
-                                    # 多筆：每張各顯示預覽 + 複製截圖
                                     try:
-                                        import fitz as _fitz
-                                        import base64 as _b64
                                         for _mno, _mpdf in _success.items():
-                                            _mdoc = _fitz.open(stream=_mpdf, filetype="pdf")
-                                            _mpix = _mdoc[0].get_pixmap(dpi=150)
-                                            _mb64 = _b64.b64encode(_mpix.tobytes("png")).decode()
+                                            _mb64 = _pdf_to_combined_b64(_mpdf)
                                             st.image(
-                                                BytesIO(_b64.b64decode(_mb64)),
-                                                caption=f"標籤預覽：{_mno}",
+                                                BytesIO(__import__('base64').b64decode(_mb64)),
+                                                caption=f"標籤預覽（全頁）：{_mno}",
                                                 use_container_width=True,
                                             )
-                                            st.components.v1.html(f"""
-<button id="cpbtn_{_mno}" onclick="copyLabel_{_mno}()" style="
-    background:#0068c9;color:white;border:none;border-radius:6px;
-    padding:8px 0;font-size:15px;cursor:pointer;width:100%;margin-top:4px">
-    複製截圖（{_mno}）
-</button>
-<div id="toast_{_mno}" style="display:none;margin-top:6px;padding:8px;
-    background:#21c354;color:white;border-radius:6px;text-align:center;font-size:14px">
-    ✓ 已複製！可直接貼上到 Codex
-</div>
-<script>
-async function copyLabel_{_mno}(){{
-    try{{
-        const blob=await fetch('data:image/png;base64,{_mb64}').then(r=>r.blob());
-        await navigator.clipboard.write([new ClipboardItem({{'image/png':blob}})]);
-        document.getElementById('toast_{_mno}').style.display='block';
-        document.getElementById('cpbtn_{_mno}').textContent='✓ 已複製';
-        document.getElementById('cpbtn_{_mno}').style.background='#21c354';
-        setTimeout(()=>{{
-            document.getElementById('toast_{_mno}').style.display='none';
-            document.getElementById('cpbtn_{_mno}').textContent='複製截圖（{_mno}）';
-            document.getElementById('cpbtn_{_mno}').style.background='#0068c9';
-        }},2500);
-    }}catch(e){{alert('複製失敗：'+e.message);}}
-}}
-</script>
-""", height=100)
+                                            _bid = f"cp_{_mno.replace('-','_')}"
+                                            st.components.v1.html(
+                                                _copy_button_html(_mb64, _bid, f"複製截圖（{_mno}）"),
+                                                height=100,
+                                            )
                                     except Exception as _mpe:
                                         st.warning(f"無法產生預覽：{_mpe}")
 
