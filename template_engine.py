@@ -688,6 +688,39 @@ def generate_labels_multiorder(
     return buf
 
 
+def _read_img_bytes(img) -> bytes | None:
+    """從 openpyxl Image 讀取原始 bytes（相容各版本）"""
+    try:
+        d = getattr(img, '_data', None)
+        if callable(d):
+            raw = d()
+            if raw:
+                return bytes(raw)
+    except Exception:
+        pass
+    try:
+        ref = getattr(img, 'ref', None)
+        if isinstance(ref, (bytes, bytearray)):
+            return bytes(ref)
+        if hasattr(ref, 'getvalue'):
+            return ref.getvalue()
+        if hasattr(ref, 'read'):
+            try:
+                ref.seek(0)
+            except Exception:
+                pass
+            return ref.read()
+    except Exception:
+        pass
+    try:
+        d = getattr(img, '_data', None)
+        if d is not None and not callable(d):
+            return bytes(d)
+    except Exception:
+        pass
+    return None
+
+
 def _extract_logo_images(ws_src) -> list[dict]:
     """
     從模板提取 logo 圖片資訊。
@@ -698,28 +731,22 @@ def _extract_logo_images(ws_src) -> list[dict]:
     result = []
     for img in getattr(ws_src, '_images', []):
         try:
-            raw = None
-            if hasattr(img, '_data') and callable(img._data):
-                raw = img._data()
-            elif hasattr(img, 'ref'):
-                ref = img.ref
-                if isinstance(ref, (bytes, bytearray)):
-                    raw = bytes(ref)
-                elif hasattr(ref, 'read'):
-                    ref.seek(0)
-                    raw = ref.read()
+            raw = _read_img_bytes(img)
             if not raw:
                 continue
 
             anchor  = img.anchor
             w_px = h_px = None
-            rel_row   = 0     # 0-based row offset in template
+            rel_row   = 0
             col_letter = "A"
 
-            if hasattr(anchor, 'ext') and getattr(anchor.ext, 'cx', None):
-                # OneCellAnchor — use EMU directly
-                w_px = int(anchor.ext.cx / 914400 * 96)
-                h_px = int(anchor.ext.cy / 914400 * 96)
+            if hasattr(anchor, 'ext'):
+                # OneCellAnchor
+                cx = getattr(anchor.ext, 'cx', 0) or 0
+                cy = getattr(anchor.ext, 'cy', 0) or 0
+                if cx > 0 and cy > 0:
+                    w_px = int(cx / 914400 * 96)
+                    h_px = int(cy / 914400 * 96)
                 if hasattr(anchor, '_from'):
                     rel_row    = anchor._from.row
                     col_letter = get_column_letter(anchor._from.col + 1)
@@ -731,8 +758,11 @@ def _extract_logo_images(ws_src) -> list[dict]:
                 if m:
                     col_letter = m.group(1)
                     rel_row    = int(m.group(2)) - 1
-                if img.width:
-                    w_px, h_px = img.width, img.height
+
+            # 尺寸兜底：用 img.width/height（pixels）
+            if not w_px and getattr(img, 'width', None):
+                w_px = img.width
+                h_px = getattr(img, 'height', img.width)
 
             if not w_px or not h_px:
                 continue
@@ -834,26 +864,7 @@ def _copy_passthrough_images(
             continue
         seen.add(pos)
         try:
-            # Read image bytes — try getvalue() first (BytesIO, position-independent)
-            raw = None
-            ref = getattr(img, 'ref', None)
-            if ref is not None:
-                if isinstance(ref, (bytes, bytearray)):
-                    raw = bytes(ref)
-                elif hasattr(ref, 'getvalue'):
-                    raw = ref.getvalue()
-                elif hasattr(ref, 'read'):
-                    try:
-                        ref.seek(0)
-                    except Exception:
-                        pass
-                    raw = ref.read()
-            if not raw:
-                try:
-                    d = img._data
-                    raw = d() if callable(d) else (bytes(d) if d else None)
-                except Exception:
-                    pass
+            raw = _read_img_bytes(img)
             if not raw:
                 continue
 

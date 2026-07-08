@@ -483,6 +483,20 @@ with tab_label:
                     key="_edit_tmpl_name_input",
                 )
 
+            # 標籤列數（自動偵測，可手動修正）
+            _auto_unit_rows = template_info.get("unit_rows", 1)
+            _ec_rows, _ec_cols = st.columns(2)
+            with _ec_rows:
+                _edit_unit_rows = st.number_input(
+                    f"每個標籤佔幾列（自動偵測={_auto_unit_rows}，模板有多份樣本時請填單份列數）",
+                    min_value=1,
+                    value=_auto_unit_rows,
+                    step=1,
+                    key="_edit_unit_rows_input",
+                )
+            with _ec_cols:
+                st.metric("並排數（自動）", template_info.get("units_per_row", 1))
+
             field_options = ["__fixed__（固定文字）"] + [
                 f"{k}（{v}）" for k, v in DYNAMIC_FIELDS.items() if k != "固定文字"
             ]
@@ -534,6 +548,7 @@ with tab_label:
 
             if st.button("儲存模板", type="primary", use_container_width=True):
                 template_info["cells"] = updated_cells
+                template_info["unit_rows"] = int(_edit_unit_rows)
                 config_json = template_to_json(template_info)
                 customer = _edit_customer.strip() or st.session_state.get("_pending_customer", "")
                 tmpl_name = _edit_tmpl_name.strip() or st.session_state.get("_pending_tmpl_name", "")
