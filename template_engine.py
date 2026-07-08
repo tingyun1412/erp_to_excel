@@ -371,6 +371,21 @@ def _detect_unit_rows(ws, first_unit_cols: list[int], max_row: int) -> int:
                for off in range(p) if start + p + off < len(keys)):
             return p
 
+    # Fallback：改比「有無值」遮罩（適用於兩份樣本客戶名稱不同但結構相同的模板）
+    def row_mask(r: int) -> tuple:
+        return tuple(bool(ws.cell(row=r, column=c).value) for c in first_unit_cols)
+
+    masks = [row_mask(r) for r in range(1, max_row + 1)]
+    m0 = masks[start]
+    for p in range(3, (max_row - start) // 2 + 1):
+        if start + p >= len(masks):
+            break
+        if masks[start + p] != m0:
+            continue
+        if all(masks[start + off] == masks[start + p + off]
+               for off in range(p) if start + p + off < len(masks)):
+            return p
+
     return max_row
 
 

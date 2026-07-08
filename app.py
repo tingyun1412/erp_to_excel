@@ -48,6 +48,12 @@ from sheets_db import (
 st.set_page_config(page_title="出貨自動化工具", page_icon="📦", layout="wide")
 st.title("📦 出貨自動化工具")
 
+
+def _tmpl_label(r: dict) -> str:
+    """模板顯示名稱：廠商=模板名稱時只顯示一個，否則顯示『廠商 — 模板』"""
+    v, t = r.get("廠商名稱", ""), r.get("模板名稱", "")
+    return v if v == t else f"{v} — {t}"
+
 if "parsed_orders" not in st.session_state:
     st.session_state.parsed_orders = []
 if "template_wb_bytes" not in st.session_state:
@@ -188,7 +194,7 @@ with tab_label:
                 selected_orders = [order_options[k] for k in selected_order_nos]
 
                 template_options = [
-                    f"{r['廠商名稱']} — {r['模板名稱']}"
+                    _tmpl_label(r)
                     for r in all_templates
                 ]
 
@@ -295,7 +301,7 @@ with tab_label:
                         _dyn = [c for c in _info.get("cells", []) if c.get("field") != "__fixed__"]
                         if not _dyn:
                             st.error(
-                                f"⚠️ 模板「{_rec['廠商名稱']} — {_rec['模板名稱']}」沒有動態欄位，"
+                                f"⚠️ 模板「{_tmpl_label(_rec)}」沒有動態欄位，"
                                 "標籤將只顯示固定文字（無料號、品名等）。"
                                 "請到「管理模板」重新上傳並分析此模板。"
                             )
@@ -380,7 +386,7 @@ with tab_label:
                             continue
                         _shown_keys.add(_tk)
                         _re = st.file_uploader(
-                            f"上傳「{_rec['廠商名稱']} — {_rec['模板名稱']}」原始 Excel（保留樣式用）",
+                            f"上傳「{_tmpl_label(_rec)}」原始 Excel（保留樣式用）",
                             type=["xlsx", "xls"],
                             key=f"reupload_{_tk}",
                         )
@@ -558,7 +564,7 @@ with tab_label:
                 st.info("尚無模板")
             else:
                 for r in all_templates:
-                    with st.expander(f"{r['廠商名稱']} — {r['模板名稱']}　（更新：{r.get('最後更新','')}）"):
+                    with st.expander(f"{_tmpl_label(r)}　（更新：{r.get('最後更新','')}）"):
                         info = template_from_json(r["設定JSON"])
                         st.write(f"標籤行數：{info.get('unit_rows')}，並排數：{info.get('units_per_row')}")
                         cells = info.get("cells", [])
