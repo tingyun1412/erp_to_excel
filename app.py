@@ -362,6 +362,7 @@ with tab_label:
                                     "order": o,
                                     "template_info": template_from_json(rec["設定JSON"]),
                                     "template_wb": twb,
+                                    "template_bytes": wb_bytes,
                                 })
 
                             buf = generate_labels_multiorder(pairs)

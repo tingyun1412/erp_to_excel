@@ -429,7 +429,7 @@ def _fill_value(cell_info: dict, item: dict, order: dict, seq: int) -> str | Non
 
 
 def _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info: dict, orders: list[dict],
-                                logo_imgs: list = None):
+                                logo_imgs: list = None, skip_images: bool = False):
     """
     Passthrough 模式：直接複製 template 的格子（保留格式），再覆寫動態欄位。
     logo_imgs: 若呼叫者已提取（避免重複讀 BytesIO），直接傳入；否則內部自行提取。
@@ -517,10 +517,11 @@ def _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info: dict, orders: li
                     ws_out.cell(row=current_row + dc["row"] - 1,
                                 column=base_col + dc["col"]).value = val
 
-        # 4. 圖片：OneCellAnchor logo + TwoCellAnchor 圖形
-        if logo_imgs:
-            _place_label_images(ws_out, logo_imgs, current_row, ws_tmpl)
-        _copy_passthrough_images(ws_out, ws_tmpl, unit_rows, current_row)
+        # 4. 圖片：OneCellAnchor logo + TwoCellAnchor 圖形（ZIP 注入時跳過，由 _inject_drawings_zip_level 處理）
+        if not skip_images:
+            if logo_imgs:
+                _place_label_images(ws_out, logo_imgs, current_row, ws_tmpl)
+            _copy_passthrough_images(ws_out, ws_tmpl, unit_rows, current_row)
         current_row += unit_rows + 1
 
 
@@ -530,12 +531,14 @@ def _write_order_to_sheet(
     template_info: dict,
     orders: list[dict],
     logo_imgs: list = None,
+    skip_images: bool = False,
 ):
     """Put all items from `orders` into `ws_out` using `template_info`."""
     is_row_repeat    = template_info.get("is_row_repeat_mode", False)
 
     if template_info.get("is_passthrough", True) and ws_tmpl and not is_row_repeat:
-        _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info, orders, logo_imgs=logo_imgs)
+        _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info, orders,
+                                    logo_imgs=logo_imgs, skip_images=skip_images)
         return
 
     unit_rows        = template_info["unit_rows"]
@@ -679,14 +682,288 @@ def generate_labels_multiorder(
         for ch in r':\/? *[]':
             ws_name = ws_name.replace(ch, "_")
         ws_out = wb_out.create_sheet(title=ws_name)
-        logo_imgs = _extract_logo_images(ws_tmpl) if ws_tmpl else []
-        _write_order_to_sheet(ws_out, ws_tmpl, tinfo, [order], logo_imgs=logo_imgs)
+        use_zip = bool(pair.get("template_bytes"))
+        logo_imgs = _extract_logo_images(ws_tmpl) if (ws_tmpl and not use_zip) else []
+        _write_order_to_sheet(ws_out, ws_tmpl, tinfo, [order],
+                              logo_imgs=logo_imgs, skip_images=use_zip)
 
     if not wb_out.sheetnames:
         wb_out.create_sheet("出貨標籤")
 
+    out_sheetnames = list(wb_out.sheetnames)
     buf = BytesIO()
     wb_out.save(buf)
+    buf.seek(0)
+
+    # ZIP-level drawing injection: copy template drawings directly, bypassing openpyxl image API
+    if any(p.get("template_bytes") for p in order_template_pairs):
+        buf = _inject_drawings_zip_level(buf, order_template_pairs, out_sheetnames)
+
+    return buf
+
+
+def _inject_drawings_zip_level(
+    output_buf: BytesIO,
+    pairs: list[dict],
+    out_sheetnames: list[str],
+) -> BytesIO:
+    """
+    Copy template drawing XML + media directly into the output xlsx ZIP.
+    Bypasses openpyxl's image API entirely, so anchor row positions are
+    reproduced faithfully from the template (fixes logo missing issue).
+
+    pairs entries must contain:
+      "template_bytes": raw bytes of the template xlsx file
+      "template_info":  dict with at least "sheet_name"
+    """
+    import zipfile
+    import io as _io
+    import re as _re
+
+    def _parse_rels(xml: str):
+        """Yield (id, type, target) for every <Relationship .../> in xml."""
+        for m in _re.finditer(r'<Relationship([^>]+)/>', xml, _re.DOTALL):
+            attrs = m.group(1)
+            id_m     = _re.search(r'\bId="([^"]*)"', attrs)
+            type_m   = _re.search(r'\bType="([^"]*)"', attrs)
+            target_m = _re.search(r'\bTarget="([^"]*)"', attrs)
+            if id_m and target_m:
+                yield (id_m.group(1),
+                       type_m.group(1) if type_m else '',
+                       target_m.group(1))
+
+    def _resolve(base_dir: str, rel_target: str) -> str:
+        """Resolve a relative path from base_dir."""
+        if rel_target.startswith('/'):
+            return rel_target.lstrip('/')
+        parts = (base_dir + '/' + rel_target).split('/')
+        out = []
+        for p in parts:
+            if p == '..':
+                if out:
+                    out.pop()
+            elif p and p != '.':
+                out.append(p)
+        return '/'.join(out)
+
+    # ── read all output zip entries ──────────────────────────────────
+    output_buf.seek(0)
+    out_files: dict[str, bytes] = {}
+    with zipfile.ZipFile(output_buf, 'r') as z:
+        for name in z.namelist():
+            out_files[name] = z.read(name)
+
+    next_drawing_num = len([k for k in out_files
+                            if _re.match(r'xl/drawings/drawing\d+\.xml$', k)]) + 1
+    next_media_num   = len([k for k in out_files if k.startswith('xl/media/')]) + 1
+
+    # ── map output sheet name → sheet file path ─────────────────────
+    out_wb_xml = out_files.get('xl/workbook.xml', b'').decode('utf-8', errors='replace')
+    out_wb_rels_xml = out_files.get('xl/_rels/workbook.xml.rels', b'').decode('utf-8', errors='replace')
+
+    out_sheet_names_order = _re.findall(r'<sheet\s[^>]*name="([^"]+)"[^>]*/>', out_wb_xml)
+    out_sheet_rids_order  = _re.findall(r'<sheet[^>]+r:id="([^"]+)"[^>]*/>', out_wb_xml)
+
+    out_rid_to_target: dict[str, str] = {}
+    for rid, rtype, target in _parse_rels(out_wb_rels_xml):
+        if 'worksheet' in rtype:
+            out_rid_to_target[rid] = target
+
+    # ── process each pair ───────────────────────────────────────────
+    for pair_idx, pair in enumerate(pairs):
+        tmpl_bytes = pair.get("template_bytes")
+        if not tmpl_bytes:
+            continue
+
+        tinfo          = pair.get("template_info", {})
+        tmpl_sname     = tinfo.get("sheet_name", "")
+        out_ws_name    = out_sheetnames[pair_idx] if pair_idx < len(out_sheetnames) else ""
+
+        # find output sheet list index
+        if out_ws_name in out_sheet_names_order:
+            list_idx = out_sheet_names_order.index(out_ws_name)
+        else:
+            list_idx = pair_idx
+
+        if list_idx >= len(out_sheet_rids_order):
+            continue
+
+        out_rid     = out_sheet_rids_order[list_idx]
+        out_target  = out_rid_to_target.get(out_rid, '')
+        if not out_target:
+            continue
+
+        out_sheet_path = _resolve('xl', out_target)
+        out_sheet_fname = out_sheet_path.split('/')[-1]
+        out_sheet_dir   = '/'.join(out_sheet_path.split('/')[:-1])
+        out_rels_path   = f'{out_sheet_dir}/_rels/{out_sheet_fname}.rels'
+
+        try:
+            with zipfile.ZipFile(_io.BytesIO(tmpl_bytes), 'r') as zt:
+                tnames = set(zt.namelist())
+
+                # ── find template sheet rId ──────────────────────────
+                tmpl_wb_xml = zt.read('xl/workbook.xml').decode('utf-8', errors='replace')
+                t_sheet_names = _re.findall(r'<sheet\s[^>]*name="([^"]+)"[^>]*/>', tmpl_wb_xml)
+                t_sheet_rids  = _re.findall(r'<sheet[^>]+r:id="([^"]+)"[^>]*/>', tmpl_wb_xml)
+
+                tmpl_rid = None
+                for sn, rid in zip(t_sheet_names, t_sheet_rids):
+                    if sn == tmpl_sname:
+                        tmpl_rid = rid
+                        break
+                if not tmpl_rid:
+                    continue
+
+                # ── find template sheet file ─────────────────────────
+                tmpl_wb_rels = zt.read('xl/_rels/workbook.xml.rels').decode('utf-8', errors='replace')
+                tmpl_sheet_target = None
+                for rid, rtype, target in _parse_rels(tmpl_wb_rels):
+                    if rid == tmpl_rid and 'worksheet' in rtype:
+                        tmpl_sheet_target = target
+                        break
+                if not tmpl_sheet_target:
+                    continue
+
+                tmpl_sheet_path = _resolve('xl', tmpl_sheet_target)
+                if tmpl_sheet_path not in tnames:
+                    continue
+
+                tmpl_sheet_fname = tmpl_sheet_path.split('/')[-1]
+                tmpl_sheet_dir   = '/'.join(tmpl_sheet_path.split('/')[:-1])
+                tmpl_rels_path   = f'{tmpl_sheet_dir}/_rels/{tmpl_sheet_fname}.rels'
+
+                if tmpl_rels_path not in tnames:
+                    continue
+
+                tmpl_sheet_rels = zt.read(tmpl_rels_path).decode('utf-8', errors='replace')
+
+                # ── find drawing relationship ────────────────────────
+                drawing_rel_target = None
+                for rid, rtype, target in _parse_rels(tmpl_sheet_rels):
+                    if 'drawing' in rtype:
+                        drawing_rel_target = target
+                        break
+                if not drawing_rel_target:
+                    continue
+
+                drawing_path = _resolve(tmpl_sheet_dir, drawing_rel_target)
+                if drawing_path not in tnames:
+                    continue
+
+                drawing_xml_bytes = zt.read(drawing_path)
+                drawing_dir  = '/'.join(drawing_path.split('/')[:-1])
+                drawing_fname = drawing_path.split('/')[-1]
+                draw_rels_path = f'{drawing_dir}/_rels/{drawing_fname}.rels'
+
+                # ── copy media, remap targets ────────────────────────
+                target_remap: dict[str, str] = {}
+                new_drawing_rels_xml: str | None = None
+
+                if draw_rels_path in tnames:
+                    draw_rels_xml = zt.read(draw_rels_path).decode('utf-8', errors='replace')
+
+                    for rid, rtype, target in _parse_rels(draw_rels_xml):
+                        media_path = _resolve(drawing_dir, target)
+                        if media_path not in tnames:
+                            continue
+
+                        media_data = zt.read(media_path)
+                        media_ext  = media_path.rsplit('.', 1)[-1].lower() if '.' in media_path else 'bin'
+
+                        # reuse identical media already in output
+                        existing = next(
+                            (k for k, v in out_files.items()
+                             if k.startswith('xl/media/') and v == media_data),
+                            None
+                        )
+                        if existing:
+                            new_name = existing.split('/')[-1]
+                        else:
+                            new_name = f'image{next_media_num}.{media_ext}'
+                            next_media_num += 1
+                            out_files[f'xl/media/{new_name}'] = media_data
+
+                            # add Default content type for extension if missing
+                            ct = out_files.get('[Content_Types].xml', b'').decode('utf-8', errors='replace')
+                            mime = {'png':'image/png','jpg':'image/jpeg','jpeg':'image/jpeg',
+                                    'gif':'image/gif','bmp':'image/bmp','tiff':'image/tiff',
+                                    'emf':'image/x-emf','wmf':'image/x-wmf'}.get(media_ext,'image/png')
+                            if f'Extension="{media_ext}"' not in ct and '</Types>' in ct:
+                                ct = ct.replace('</Types>',
+                                    f'  <Default Extension="{media_ext}" ContentType="{mime}"/>\n</Types>')
+                                out_files['[Content_Types].xml'] = ct.encode('utf-8')
+
+                        target_remap[target] = f'../media/{new_name}'
+
+                    new_drawing_rels_xml = draw_rels_xml
+                    for old_t, new_t in target_remap.items():
+                        new_drawing_rels_xml = new_drawing_rels_xml.replace(
+                            f'Target="{old_t}"', f'Target="{new_t}"')
+
+                # ── write drawing to output ──────────────────────────
+                draw_num = next_drawing_num
+                next_drawing_num += 1
+                new_draw_path      = f'xl/drawings/drawing{draw_num}.xml'
+                new_draw_rels_path = f'xl/drawings/_rels/drawing{draw_num}.xml.rels'
+
+                out_files[new_draw_path] = drawing_xml_bytes
+                if new_drawing_rels_xml:
+                    out_files[new_draw_rels_path] = new_drawing_rels_xml.encode('utf-8')
+
+                # add Override content type for drawing
+                ct = out_files.get('[Content_Types].xml', b'').decode('utf-8', errors='replace')
+                if f'drawing{draw_num}.xml' not in ct and '</Types>' in ct:
+                    ct = ct.replace('</Types>',
+                        f'  <Override PartName="/xl/drawings/drawing{draw_num}.xml"'
+                        f' ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>\n</Types>')
+                    out_files['[Content_Types].xml'] = ct.encode('utf-8')
+
+                # ── link drawing to output sheet ─────────────────────
+                existing_rels = out_files.get(out_rels_path, b'').decode('utf-8', errors='replace')
+                if not existing_rels.strip():
+                    existing_rels = (
+                        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+                        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                        '</Relationships>'
+                    )
+
+                max_rid_n = max(
+                    (int(r[3:]) for r in _re.findall(r'Id="(rId\d+)"', existing_rels)),
+                    default=0
+                )
+                draw_rid = f'rId{max_rid_n + 1}'
+                draw_rel_type = ('http://schemas.openxmlformats.org/officeDocument'
+                                 '/2006/relationships/drawing')
+                new_rel = (f'<Relationship Id="{draw_rid}" Type="{draw_rel_type}"'
+                           f' Target="../drawings/drawing{draw_num}.xml"/>')
+
+                existing_rels = existing_rels.replace(
+                    '</Relationships>', f'  {new_rel}\n</Relationships>')
+                out_files[out_rels_path] = existing_rels.encode('utf-8')
+
+                # add <drawing r:id="..."/> to sheet XML if not already present
+                if out_sheet_path in out_files:
+                    sx = out_files[out_sheet_path].decode('utf-8', errors='replace')
+                    if '<drawing ' not in sx and '<drawing/' not in sx:
+                        # ensure xmlns:r is declared on <worksheet> (openpyxl omits it on blank sheets)
+                        _r_ns = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+                        if _r_ns not in sx:
+                            sx = sx.replace('<worksheet ', f'<worksheet {_r_ns} ', 1)
+                            if '<worksheet ' not in sx:  # no space after <worksheet
+                                sx = sx.replace('<worksheet>', f'<worksheet {_r_ns}>', 1)
+                        sx = sx.replace('</worksheet>',
+                                        f'  <drawing r:id="{draw_rid}"/>\n</worksheet>')
+                        out_files[out_sheet_path] = sx.encode('utf-8')
+
+        except Exception:
+            pass  # cell data preserved; drawing injection skipped for this sheet
+
+    # ── repack output zip ────────────────────────────────────────────
+    buf = _io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zw:
+        for name, data in out_files.items():
+            zw.writestr(name, data if isinstance(data, bytes) else data.encode('utf-8'))
     buf.seek(0)
     return buf
 
