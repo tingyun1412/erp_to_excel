@@ -283,18 +283,20 @@ def analyze_template(wb: openpyxl.Workbook, sheet_name: str) -> dict:
     for _c in list(cells_info):
         if not _c["field"].endswith("_inline"):
             continue
-        # 純標籤格判斷：
-        #   (a) 值以「：」結尾（"料號："）
-        #   (b) 值完全不含「：」 且右格存在 ("料號" → 右格為值格)
-        is_colon_label = bool(re.match(r'^[^：:]+[：:]\s*$', _c["value"]))
         _adj = _cell_map.get((_c["row"], _c["col"] + 1))
-        is_plain_label = (not re.search(r'[：:]', _c["value"])) and bool(_adj)
-        if is_colon_label or is_plain_label:
+        # KV-pair 判斷條件（三者同時成立才轉換）：
+        #   1. 純標籤格：值以「：」結尾 或 完全不含「：」
+        #   2. 右格存在於同一單元
+        #   3. 右格目前是 __fixed__（原始樣本值未被辨識成動態欄位）
+        # 注意：inline 格式（"料號：蘇州廣年-001" 同一格）不可觸發此邏輯，
+        #       因為 _adj 若為 None 或已是其他 _inline field，條件自然不成立。
+        is_colon_label = bool(re.match(r'^[^：:]+[：:]\s*$', _c["value"]))
+        is_plain_label = not re.search(r'[：:]', _c["value"])
+        if (is_colon_label or is_plain_label) and _adj and _adj["field"] == "__fixed__":
             _direct = _INLINE_TO_DIRECT.get(_c["field"])
             if _direct:
                 _c["field"] = "__fixed__"   # 標籤格固定不填值
-                if _adj and _adj["field"] == "__fixed__":
-                    _adj["field"] = _direct  # 相鄰值格標為動態欄位
+                _adj["field"] = _direct     # 相鄰值格標為動態欄位
 
     # 欄寬和行高
     col_widths = {}
@@ -443,6 +445,7 @@ def _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info: dict, orders: li
     ]
 
     all_items = [(item, order) for order in orders for item in order.get("items", [])]
+    logo_imgs = _extract_logo_images(ws_tmpl)  # OneCellAnchor logos（TwoCellAnchor 由下方 _copy_passthrough_images 處理）
     current_row = 1
 
     # 每列放不同品項（最多 units_per_row 張），不重複
@@ -496,6 +499,9 @@ def _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info: dict, orders: li
                     ws_out.cell(row=current_row + dc["row"] - 1,
                                 column=base_col + dc["col"]).value = val
 
+        # 4. 圖片：OneCellAnchor logo + TwoCellAnchor 圖形
+        if logo_imgs:
+            _place_label_images(ws_out, logo_imgs, current_row, ws_tmpl)
         _copy_passthrough_images(ws_out, ws_tmpl, unit_rows, current_row)
         current_row += unit_rows + 1
 
