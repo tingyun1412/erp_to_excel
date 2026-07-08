@@ -428,9 +428,11 @@ def _fill_value(cell_info: dict, item: dict, order: dict, seq: int) -> str | Non
         return _get_value(item, order, field, seq)
 
 
-def _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info: dict, orders: list[dict]):
+def _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info: dict, orders: list[dict],
+                                logo_imgs: list = None):
     """
     Passthrough 模式：直接複製 template 的格子（保留格式），再覆寫動態欄位。
+    logo_imgs: 若呼叫者已提取（避免重複讀 BytesIO），直接傳入；否則內部自行提取。
     """
     unit_rows            = template_info["unit_rows"]
     columns_per_unit     = template_info["columns_per_unit"]
@@ -460,7 +462,8 @@ def _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info: dict, orders: li
     ]
 
     all_items = [(item, order) for order in orders for item in order.get("items", [])]
-    logo_imgs = _extract_logo_images(ws_tmpl)  # OneCellAnchor logos（TwoCellAnchor 由下方 _copy_passthrough_images 處理）
+    if logo_imgs is None:
+        logo_imgs = _extract_logo_images(ws_tmpl)  # OneCellAnchor logos
     current_row = 1
 
     # 每列放不同品項（最多 units_per_row 張），不重複
@@ -531,8 +534,8 @@ def _write_order_to_sheet(
     """Put all items from `orders` into `ws_out` using `template_info`."""
     is_row_repeat    = template_info.get("is_row_repeat_mode", False)
 
-    if template_info.get("is_passthrough") and ws_tmpl and not is_row_repeat:
-        _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info, orders)
+    if template_info.get("is_passthrough", True) and ws_tmpl and not is_row_repeat:
+        _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info, orders, logo_imgs=logo_imgs)
         return
 
     unit_rows        = template_info["unit_rows"]
