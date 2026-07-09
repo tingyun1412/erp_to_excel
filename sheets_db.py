@@ -107,6 +107,17 @@ def _rows_to_records(rows: list[list], headers: list[str]) -> list[dict]:
 
 # ── Google Drive 模板 Excel 存取 ──────────────────────────────────
 
+def _raise_with_body(r):
+    """requests 的 raise_for_status() 只給狀態碼，把 Drive API 回傳的錯誤訊息也包進去，
+    方便判斷是權限問題、額度問題還是其他問題（例如 service account 沒有 My Drive 儲存額度）。"""
+    if r.status_code >= 400:
+        try:
+            detail = r.json().get("error", {}).get("message", r.text)
+        except Exception:
+            detail = r.text
+        raise RuntimeError(f"{r.status_code} {r.reason}: {detail}")
+
+
 @st.cache_data(ttl=3600)
 def _drive_folder_id() -> str:
     """取得（或建立）ERP標籤模板 Drive 資料夾，回傳 folder ID。"""
@@ -114,6 +125,7 @@ def _drive_folder_id() -> str:
     q = f"name='{_DRIVE_FOLDER}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
     r = session.get("https://www.googleapis.com/drive/v3/files",
                     params={"q": q, "fields": "files(id)"})
+    _raise_with_body(r)
     files = r.json().get("files", [])
     if files:
         return files[0]["id"]
@@ -122,7 +134,7 @@ def _drive_folder_id() -> str:
         json={"name": _DRIVE_FOLDER, "mimeType": "application/vnd.google-apps.folder"},
         params={"fields": "id"},
     )
-    r.raise_for_status()
+    _raise_with_body(r)
     return r.json()["id"]
 
 
@@ -142,12 +154,13 @@ def upload_template_excel(excel_bytes: bytes, customer: str, template_name: str)
     if existing:
         # 更新既有檔案內容
         file_id = existing[0]["id"]
-        session.patch(
+        r = session.patch(
             f"https://www.googleapis.com/upload/drive/v3/files/{file_id}",
             params={"uploadType": "media"},
             headers={"Content-Type": _EXCEL_MIME},
             data=excel_bytes,
         )
+        _raise_with_body(r)
         return file_id
 
     # 新建：multipart upload
@@ -165,7 +178,7 @@ def upload_template_excel(excel_bytes: bytes, customer: str, template_name: str)
         headers={"Content-Type": f"multipart/related; boundary={boundary}"},
         data=body,
     )
-    r.raise_for_status()
+    _raise_with_body(r)
     return r.json().get("id", "")
 
 
@@ -177,7 +190,7 @@ def download_template_excel(file_id: str) -> bytes:
         f"https://www.googleapis.com/drive/v3/files/{file_id}",
         params={"alt": "media"},
     )
-    r.raise_for_status()
+    _raise_with_body(r)
     return r.content
 
 
