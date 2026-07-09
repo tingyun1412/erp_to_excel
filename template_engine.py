@@ -35,6 +35,10 @@ DYNAMIC_FIELDS = {
 
 FIELD_LABELS = list(DYNAMIC_FIELDS.keys())
 
+# 廠商使用跟 LSCR 一樣的標籤印表機（TSC TTP-246M Plus），輸出行高/頁面設定需強制對齊，
+# 不採用上傳範本 Excel 裡原本的行高（避免印出來跟 LSCR 尺寸對不齊）。
+_LSCR_PRINTER_VENDORS = {"晶晟"}
+
 
 def _fmt_date(d: str) -> str:
     return d  # 直接回傳 YYYYMMDD，不加點
@@ -429,11 +433,14 @@ def _fill_value(cell_info: dict, item: dict, order: dict, seq: int) -> str | Non
 
 
 def _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info: dict, orders: list[dict],
-                                logo_imgs: list = None, skip_images: bool = False):
+                                logo_imgs: list = None, skip_images: bool = False,
+                                vendor: str = ""):
     """
     Passthrough 模式：直接複製 template 的格子（保留格式），再覆寫動態欄位。
     logo_imgs: 若呼叫者已提取（避免重複讀 BytesIO），直接傳入；否則內部自行提取。
+    vendor: 廠商名稱；若屬於 _LSCR_PRINTER_VENDORS，行高/列間距/頁面設定強制對齊 LSCR 輸出。
     """
+    use_lscr_layout       = vendor in _LSCR_PRINTER_VENDORS
     unit_rows            = template_info["unit_rows"]
     columns_per_unit     = template_info["columns_per_unit"]
     units_per_row        = template_info.get("units_per_row", 1)
@@ -470,10 +477,15 @@ def _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info: dict, orders: li
     for group_start in range(0, len(all_items), units_per_row):
         group = all_items[group_start:group_start + units_per_row]
 
-        # 行高
-        for ri_str, h in row_heights.items():
-            if h is not None:
-                ws_out.row_dimensions[current_row + int(ri_str) - 1].height = h
+        # 行高：LSCR 印表機廠商強制用固定行高（跟 write_lscr_labels 一致），否則沿用範本行高
+        if use_lscr_layout:
+            ws_out.row_dimensions[current_row].height = 14.8
+            for r_off in range(1, unit_rows):
+                ws_out.row_dimensions[current_row + r_off].height = 14.0
+        else:
+            for ri_str, h in row_heights.items():
+                if h is not None:
+                    ws_out.row_dimensions[current_row + int(ri_str) - 1].height = h
 
         for ui, (item, order) in enumerate(group):
             seq = group_start + ui + 1
@@ -522,7 +534,28 @@ def _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info: dict, orders: li
             if logo_imgs:
                 _place_label_images(ws_out, logo_imgs, current_row, ws_tmpl)
             _copy_passthrough_images(ws_out, ws_tmpl, unit_rows, current_row)
-        current_row += unit_rows + 1
+        # LSCR 印表機廠商：跟 write_lscr_labels 一樣，標籤間不留空白列（每頁剛好一份標籤）
+        current_row += unit_rows if use_lscr_layout else unit_rows + 1
+
+    if use_lscr_layout:
+        _apply_lscr_page_setup(ws_out, unit_rows, current_row - 1)
+
+
+def _apply_lscr_page_setup(ws_out, unit_rows: int, last_row: int):
+    """套用跟 write_lscr_labels 完全一致的紙張/邊界/分頁設定（TSC TTP-246M Plus，106×40mm）。"""
+    from openpyxl.worksheet.pagebreak import Break as _Break
+    from openpyxl.worksheet.page import PageMargins as _PageMargins
+
+    for br in range(unit_rows, last_row + 1, unit_rows):
+        ws_out.row_breaks.append(_Break(id=br))
+
+    ws_out.page_setup.paperWidth  = "106mm"
+    ws_out.page_setup.paperHeight = "40mm"
+    ws_out.page_setup.orientation = 'landscape'
+    ws_out.page_margins = _PageMargins(
+        left=0.2, right=0.04, top=0.04, bottom=0.04, header=0, footer=0
+    )
+    ws_out.page_setup.fitToPage = False
 
 
 def _write_order_to_sheet(
@@ -532,13 +565,15 @@ def _write_order_to_sheet(
     orders: list[dict],
     logo_imgs: list = None,
     skip_images: bool = False,
+    vendor: str = "",
 ):
     """Put all items from `orders` into `ws_out` using `template_info`."""
     is_row_repeat    = template_info.get("is_row_repeat_mode", False)
 
     if template_info.get("is_passthrough", True) and ws_tmpl and not is_row_repeat:
         _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info, orders,
-                                    logo_imgs=logo_imgs, skip_images=skip_images)
+                                    logo_imgs=logo_imgs, skip_images=skip_images,
+                                    vendor=vendor)
         return
 
     unit_rows        = template_info["unit_rows"]
@@ -663,6 +698,7 @@ def generate_labels_multiorder(
             "order": <order_dict>,
             "template_info": <template_info_dict>,
             "template_wb": <openpyxl.Workbook>,  # 可為 None
+            "vendor": <str>,  # 廠商名稱，用於判斷是否套用 LSCR 印表機固定行高/頁面設定
         },
         ...
     ]
@@ -674,6 +710,7 @@ def generate_labels_multiorder(
         order = pair["order"]
         tinfo = pair["template_info"]
         twb   = pair.get("template_wb") or openpyxl.Workbook()
+        vendor = pair.get("vendor", "")
 
         sname = tinfo.get("sheet_name", "")
         ws_tmpl = twb[sname] if sname in twb.sheetnames else None
@@ -685,7 +722,7 @@ def generate_labels_multiorder(
         use_zip = bool(pair.get("template_bytes"))
         logo_imgs = _extract_logo_images(ws_tmpl) if (ws_tmpl and not use_zip) else []
         _write_order_to_sheet(ws_out, ws_tmpl, tinfo, [order],
-                              logo_imgs=logo_imgs, skip_images=use_zip)
+                              logo_imgs=logo_imgs, skip_images=use_zip, vendor=vendor)
 
     if not wb_out.sheetnames:
         wb_out.create_sheet("出貨標籤")
@@ -746,6 +783,23 @@ def _inject_drawings_zip_level(
                 out.append(p)
         return '/'.join(out)
 
+    _anchor_pat = _re.compile(
+        r'(<xdr:(?:twoCellAnchor|oneCellAnchor)[^>]*>.*?</xdr:(?:twoCellAnchor|oneCellAnchor)>)',
+        _re.DOTALL
+    )
+
+    def _anchor_from_row(a: str) -> int:
+        m = _re.search(r'<xdr:from>.*?<xdr:row>(\d+)</xdr:row>', a, _re.DOTALL)
+        return int(m.group(1)) if m else 9999
+
+    def _shift_anchor(a: str, row_off: int, col_off: int = 0) -> str:
+        def _inc_row(m): return f'<xdr:row>{int(m.group(1)) + row_off}</xdr:row>'
+        result = _re.sub(r'<xdr:row>(\d+)</xdr:row>', _inc_row, a)
+        if col_off:
+            def _inc_col(m): return f'<xdr:col>{int(m.group(1)) + col_off}</xdr:col>'
+            result = _re.sub(r'<xdr:col>(\d+)</xdr:col>', _inc_col, result)
+        return result
+
     # ── read all output zip entries ──────────────────────────────────
     output_buf.seek(0)
     out_files: dict[str, bytes] = {}
@@ -778,6 +832,15 @@ def _inject_drawings_zip_level(
         tinfo          = pair.get("template_info", {})
         tmpl_sname     = tinfo.get("sheet_name", "")
         out_ws_name    = out_sheetnames[pair_idx] if pair_idx < len(out_sheetnames) else ""
+
+        order_p             = pair.get("order", {})
+        vendor_p             = pair.get("vendor", "")
+        unit_rows_p          = tinfo.get("unit_rows", 1)
+        units_per_row_p      = tinfo.get("units_per_row", 1) or 1
+        gap_cols_p           = tinfo.get("gap_cols", 1)
+        columns_per_unit_p   = tinfo.get("columns_per_unit", 1)
+        use_lscr_layout_p    = vendor_p in _LSCR_PRINTER_VENDORS
+        n_items_p            = len(order_p.get("items", []))
 
         # find output sheet list index
         if out_ws_name in out_sheet_names_order:
@@ -851,7 +914,7 @@ def _inject_drawings_zip_level(
                 if drawing_path not in tnames:
                     continue
 
-                drawing_xml_bytes = zt.read(drawing_path)
+                drawing_xml_raw = zt.read(drawing_path).decode('utf-8', errors='replace')
                 drawing_dir  = '/'.join(drawing_path.split('/')[:-1])
                 drawing_fname = drawing_path.split('/')[-1]
                 draw_rels_path = f'{drawing_dir}/_rels/{drawing_fname}.rels'
@@ -900,6 +963,32 @@ def _inject_drawings_zip_level(
                     for old_t, new_t in target_remap.items():
                         new_drawing_rels_xml = new_drawing_rels_xml.replace(
                             f'Target="{old_t}"', f'Target="{new_t}"')
+
+                # ── 只保留單一標籤範圍內的 anchor（rel_row < unit_rows），
+                #    再依實際產出的標籤數量/欄位偏移逐一複製並位移，
+                #    避免只有一個標籤時，模板裡其他列的 anchor 也被原封不動整批複製過去。
+                label_anchors = [a for a in _anchor_pat.findall(drawing_xml_raw)
+                                 if _anchor_from_row(a) < unit_rows_p]
+
+                new_anchor_parts: list[str] = []
+                if label_anchors:
+                    out_row = 1
+                    total = max(n_items_p, 1)
+                    for group_start in range(0, total, units_per_row_p):
+                        group_size = min(units_per_row_p, total - group_start)
+                        row_off = out_row - 1
+                        for ui in range(group_size):
+                            col_off = ui * (columns_per_unit_p + gap_cols_p)
+                            for a_xml in label_anchors:
+                                new_anchor_parts.append(_shift_anchor(a_xml, row_off, col_off))
+                        out_row += unit_rows_p if use_lscr_layout_p else unit_rows_p + 1
+
+                _ns_m = _re.match(r'(<\?xml[^>]*\?>)?\s*(<xdr:wsDr[^>]*>)', drawing_xml_raw, _re.DOTALL)
+                _header = ((_ns_m.group(1) or '') + _ns_m.group(2)) if _ns_m else (
+                    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                    '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"'
+                    ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">')
+                drawing_xml_bytes = (_header + ''.join(new_anchor_parts) + '</xdr:wsDr>').encode('utf-8')
 
                 # ── write drawing to output ──────────────────────────
                 draw_num = next_drawing_num

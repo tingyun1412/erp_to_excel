@@ -119,17 +119,30 @@ with tab_label:
     st.subheader("出貨標籤")
 
     # 頁面一開啟就從 Google Drive 補載所有有 ID 的模板 Excel（不需等有訂單才跑）
+    _preload_missing = []   # 雲端根本沒有 Excel檔案ID（之前上傳時就沒同步成功）
+    _preload_failed  = []   # 有 Excel檔案ID 但這次下載失敗（網路/權限問題）
     try:
         _all_tpls_preload = load_templates()
         for _tr in _all_tpls_preload:
             _tk = f"{_tr['廠商名稱']}_{_tr['模板名稱']}"
-            if _tk not in st.session_state.template_wb_bytes and _tr.get("Excel檔案ID"):
-                try:
-                    st.session_state.template_wb_bytes[_tk] = download_template_excel(_tr["Excel檔案ID"])
-                except Exception:
-                    pass
+            if _tk in st.session_state.template_wb_bytes:
+                continue
+            if not _tr.get("Excel檔案ID"):
+                _preload_missing.append(_tmpl_label(_tr))
+                continue
+            try:
+                st.session_state.template_wb_bytes[_tk] = download_template_excel(_tr["Excel檔案ID"])
+            except Exception:
+                _preload_failed.append(_tmpl_label(_tr))
     except Exception:
         pass
+
+    if _preload_missing or _preload_failed:
+        with st.expander(f"⚠️ {len(_preload_missing) + len(_preload_failed)} 個模板需要重新上傳原始 Excel", expanded=False):
+            if _preload_missing:
+                st.caption("尚未同步到雲端（請到「管理模板」重新分析補傳一次即可永久解決）：" + "、".join(_preload_missing))
+            if _preload_failed:
+                st.caption("雲端下載失敗（可能是暫時性網路問題，重新整理再試一次）：" + "、".join(_preload_failed))
 
     sub_tab_use, sub_tab_manage, sub_tab_erp, sub_tab_lscr = st.tabs(["產出標籤", "管理模板", "從廠商網站下載標籤", "LSCR 確認單"])
 
@@ -363,6 +376,7 @@ with tab_label:
                                     "template_info": template_from_json(rec["設定JSON"]),
                                     "template_wb": twb,
                                     "template_bytes": wb_bytes,
+                                    "vendor": rec.get("廠商名稱", ""),
                                 })
 
                             buf = generate_labels_multiorder(pairs)
@@ -430,11 +444,14 @@ with tab_label:
                         st.error("無法分析任何工作表")
                     else:
                         saved, skipped = 0, 0
+                        sync_errors = []
                         for sname, info in results.items():
                             try:
                                 vendor = new_customer.strip() or sname
                                 tname = new_tmpl_name.strip() or sname
-                                save_template(vendor, tname, template_to_json(info), excel_bytes=tmpl_bytes)
+                                _err = save_template(vendor, tname, template_to_json(info), excel_bytes=tmpl_bytes)
+                                if _err:
+                                    sync_errors.append(f"{vendor} — {tname}")
                                 tmpl_key = f"{vendor}_{tname}"
                                 st.session_state.template_wb_bytes[tmpl_key] = tmpl_bytes
                                 saved += 1
@@ -442,6 +459,13 @@ with tab_label:
                                 skipped += 1
                         clear_cache()
                         st.success(f"完成！成功建立 {saved} 個模板" + (f"，{skipped} 個失敗" if skipped else ""))
+                        if sync_errors:
+                            st.warning(
+                                "⚠️ 以下模板的原始 Excel 未能同步到雲端（僅存在目前分頁的暫存中）："
+                                + "、".join(sync_errors)
+                                + "。下次重新整理或換裝置時會需要重新上傳，請到「現有模板」用"
+                                "「🔄 重新分析」補傳一次即可。"
+                            )
                         st.rerun()
             else:
                 selected_sheet = st.selectbox("選擇要分析的工作表", sheet_names)
@@ -557,7 +581,7 @@ with tab_label:
 
                 try:
                     _wb_bytes = st.session_state.get("_pending_tmpl_bytes") or b""
-                    save_template(customer, tmpl_name, config_json, excel_bytes=_wb_bytes or None)
+                    _sync_err = save_template(customer, tmpl_name, config_json, excel_bytes=_wb_bytes or None)
                     # 快取 workbook bytes
                     st.session_state.template_wb_bytes[tmpl_key] = _wb_bytes
                     # 清除暫存
@@ -567,6 +591,12 @@ with tab_label:
                     del st.session_state["_pending_tmpl_name"]
                     clear_cache()
                     st.success(f"模板「{customer} — {tmpl_name}」已儲存！")
+                    if _sync_err:
+                        st.warning(
+                            f"⚠️ 原始 Excel 未能同步到雲端（{_sync_err}），"
+                            "重新整理頁面或換裝置後會需要重新上傳，請稍後到「現有模板」"
+                            "用「🔄 重新分析」補傳一次。"
+                        )
                     st.rerun()
                 except Exception as e:
                     st.error(f"儲存失敗：{e}")
@@ -622,10 +652,12 @@ with tab_label:
                                 _re_sname = _re_wb.sheetnames[0]
                             _re_info = analyze_template(_re_wb, _re_sname)
                             if _re_info and _re_info.get("cells"):
-                                save_template(r["廠商名稱"], r["模板名稱"], template_to_json(_re_info), excel_bytes=_re_bytes)
+                                _re_err = save_template(r["廠商名稱"], r["模板名稱"], template_to_json(_re_info), excel_bytes=_re_bytes)
                                 st.session_state.template_wb_bytes[_tmpl_key] = _re_bytes
                                 clear_cache()
                                 st.success(f"重新分析完成，找到 {len([c for c in _re_info['cells'] if c['field']!='__fixed__'])} 個動態欄位")
+                                if _re_err:
+                                    st.warning(f"⚠️ 原始 Excel 未能同步到雲端（{_re_err}），下次重新整理可能又要重傳一次。")
                                 st.rerun()
                             else:
                                 st.error("分析失敗，此工作表無內容")
@@ -831,14 +863,14 @@ async function copyLabel_{btn_id}(){{
                                     )
                                     try:
                                         _b64str = _pdf_to_combined_b64(_pdf)
+                                        st.components.v1.html(
+                                            _copy_button_html(_b64str, "cp_single", "複製截圖"),
+                                            height=100,
+                                        )
                                         st.image(
                                             BytesIO(__import__('base64').b64decode(_b64str)),
                                             caption=f"標籤預覽（全頁）：{_ono}",
                                             use_container_width=True,
-                                        )
-                                        st.components.v1.html(
-                                            _copy_button_html(_b64str, "cp_single", "複製截圖"),
-                                            height=100,
                                         )
                                     except Exception as _pe:
                                         st.warning(f"無法產生預覽：{_pe}")
@@ -854,15 +886,15 @@ async function copyLabel_{btn_id}(){{
                                     try:
                                         for _mno, _mpdf in _success.items():
                                             _mb64 = _pdf_to_combined_b64(_mpdf)
-                                            st.image(
-                                                BytesIO(__import__('base64').b64decode(_mb64)),
-                                                caption=f"標籤預覽（全頁）：{_mno}",
-                                                use_container_width=True,
-                                            )
                                             _bid = f"cp_{_mno.replace('-','_')}"
                                             st.components.v1.html(
                                                 _copy_button_html(_mb64, _bid, f"複製截圖（{_mno}）"),
                                                 height=100,
+                                            )
+                                            st.image(
+                                                BytesIO(__import__('base64').b64decode(_mb64)),
+                                                caption=f"標籤預覽（全頁）：{_mno}",
+                                                use_container_width=True,
                                             )
                                     except Exception as _mpe:
                                         st.warning(f"無法產生預覽：{_mpe}")

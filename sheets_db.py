@@ -193,26 +193,33 @@ def load_templates(customer: str = "") -> list[dict]:
 
 
 def save_template(customer: str, template_name: str, config_json: str,
-                  excel_bytes: bytes = None):
-    """儲存模板設定到 Sheets；若有 excel_bytes 則同步上傳到 Drive。"""
+                  excel_bytes: bytes = None) -> str | None:
+    """
+    儲存模板設定到 Sheets；若有 excel_bytes 則同步上傳到 Drive。
+    回傳值：Drive 上傳失敗時回傳錯誤訊息字串（設定 JSON 仍會存檔），成功則回傳 None。
+    呼叫端應檢查回傳值並提示使用者，否則下次重開瀏覽器會因為 Excel 沒同步到雲端
+    而需要重新上傳（Excel檔案ID 欄位是空的）。
+    """
     ws = get_sheet(SHEET_TEMPLATES)
     records = _rows_to_records(_retry(ws.get_all_values), TEMPLATES_HEADERS)
     now = datetime.now(_TW).strftime("%Y/%m/%d %H:%M")
 
-    # 上傳 Excel 到 Drive（失敗不中斷存檔流程）
+    # 上傳 Excel 到 Drive（失敗不中斷存檔流程，但把錯誤回傳給呼叫端顯示）
     file_id = ""
+    upload_error: str | None = None
     if excel_bytes:
         try:
             file_id = upload_template_excel(excel_bytes, customer, template_name)
-        except Exception:
-            pass
+        except Exception as e:
+            upload_error = str(e)
 
     for i, r in enumerate(records):
         if r.get("廠商名稱") == customer and r.get("模板名稱") == template_name:
             keep_fid = file_id or r.get("Excel檔案ID", "")
             _retry(lambda: ws.update(f"C{i+2}:E{i+2}", [[config_json, now, keep_fid]]))
-            return
+            return upload_error
     _retry(lambda: ws.append_row([customer, template_name, config_json, now, file_id]))
+    return upload_error
 
 
 def delete_template(customer: str, template_name: str):
