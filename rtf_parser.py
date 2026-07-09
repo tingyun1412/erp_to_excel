@@ -27,7 +27,7 @@ _HEADER_NOISE_LABELS = {
     "客戶代號", "客戶名稱", "聯", "絡", "人", "統一編號", "送貨地址",
     "單據日期", "單據號碼", "訂單單號", "發票號碼", "送貨電話",
     "傳\u3000\u3000真", "行動電話", "聯絡電話", "頁\u3000\u3000次",
-    "序號", "品名／規格", "單位", "數量", "銷貨單", "備註",
+    "序號", "品名／規格", "單位", "數量", "銷貨單", "備註", "單價", "金額",
     "GC", "單號", "客戶簽收：", "業務：", "審核：", "經辦人：",
 }
 
@@ -269,10 +269,23 @@ def _extract_shapes(text: str) -> list[dict]:
     return shapes
 
 
+def _is_numeric_amount(v: str) -> bool:
+    """True if v is a numeric amount possibly with thousands commas: '515.000', '5,150.000'."""
+    return bool(re.match(r'^\d{1,3}(,\d{3})*(\.\d+)?$', v) or re.match(r'^\d+(\.\d+)?$', v))
+
+
+def _parse_amount(v: str) -> float:
+    """Parse '5,150.000' or '515.000' → float."""
+    try:
+        return float(v.replace(',', ''))
+    except (ValueError, AttributeError):
+        return 0.0
+
+
 def _find_col_x_from_header(shapes: list[dict]) -> dict[str, int]:
     """
     從所有 shapes（過濾噪音前）找標題列的欄位 X 座標。
-    回傳 {'name': x, 'qty': x}（找到幾個回傳幾個）。
+    回傳 {'name': x, 'qty': x, 'unit_price': x, 'amount': x}（找到幾個回傳幾個）。
     """
     result: dict[str, int] = {}
     for s in shapes:
@@ -281,6 +294,10 @@ def _find_col_x_from_header(shapes: list[dict]) -> dict[str, int]:
                 result['name'] = s['left']
             if v == '數量' and 'qty' not in result:
                 result['qty'] = s['left']
+            if v == '單價' and 'unit_price' not in result:
+                result['unit_price'] = s['left']
+            if v == '金額' and 'amount' not in result:
+                result['amount'] = s['left']
     return result
 
 
@@ -295,9 +312,11 @@ def _parse_items_by_position(rtf_bytes: bytes, ship_date: str, customer: str) ->
     shapes = _extract_shapes(text)
 
     # ── 先從標題找欄位邊界（過濾噪音前）────────────────────────────
-    col_x      = _find_col_x_from_header(shapes)
-    name_col_x = col_x.get('name')
-    qty_col_x  = col_x.get('qty')
+    col_x        = _find_col_x_from_header(shapes)
+    name_col_x   = col_x.get('name')
+    qty_col_x    = col_x.get('qty')
+    price_col_x  = col_x.get('unit_price')
+    amount_col_x = col_x.get('amount')
     ALIGN_TOL  = 80    # twips，欄位邊界容忍（~1.4mm）
     use_header = (name_col_x is not None and qty_col_x is not None
                   and qty_col_x > name_col_x + ALIGN_TOL * 2)
@@ -404,10 +423,20 @@ def _parse_items_by_position(rtf_bytes: bytes, ship_date: str, customer: str) ->
                         else:
                             ns.append(v)
 
-                # 後置欄位：批號 / 備注 / 單位（短中文跳過）
+                # 後置欄位：單價 / 金額 / 批號 / 備注 / 單位（短中文跳過）
                 for x_key in sorted(post_sub):
                     bucket = post_sub[x_key]
                     if item_idx >= len(bucket):
+                        continue
+                    if price_col_x is not None and x_key <= price_col_x + ALIGN_TOL:
+                        for v in bucket[item_idx]['vals']:
+                            if _is_numeric_amount(v):
+                                item['unit_price'] = _parse_amount(v)
+                        continue
+                    if amount_col_x is not None and x_key <= amount_col_x + ALIGN_TOL:
+                        for v in bucket[item_idx]['vals']:
+                            if _is_numeric_amount(v):
+                                item['amount'] = _parse_amount(v)
                         continue
                     for v in bucket[item_idx]['vals']:
                         if _is_chinese(v) and len(v) <= 3:
@@ -418,7 +447,8 @@ def _parse_items_by_position(rtf_bytes: bytes, ship_date: str, customer: str) ->
 
                 # 後置中不是批號/料號的值（如規格溢位）→ 補入規格
                 for v in post_vals:
-                    if not _is_12digit_lot(v) and not _is_rp_lot(v) and not _is_part_no(v):
+                    if (not _is_12digit_lot(v) and not _is_rp_lot(v)
+                            and not _is_part_no(v) and not _is_qty(v)):
                         ns.append(v)
 
             else:
