@@ -329,6 +329,7 @@ with tab_label:
                             # 套用分裝：展開品項
                             def _expand_orders(orders, pkg_df):
                                 result = []
+                                _pkg_gid = [0]
                                 for o in orders:
                                     new_o = dict(o)
                                     new_items = []
@@ -346,15 +347,21 @@ with tab_label:
                                             # 只有一箱，印一張
                                             new_items.append(dict(itm))
                                         else:
-                                            # 固定 2 張小標籤（每箱數量）+ 1 張大標籤（總數量）並排，
-                                            # 不論每箱數量填多少都印 3 張——箱數由印標籤的人自己決定
+                                            # 固定 2 張小標籤（每箱數量）+ 1 張大標籤（總數量）並排在同一列，
+                                            # 不論每箱數量填多少都印 3 張——箱數由印標籤的人自己決定。
+                                            # _pkg_group 標記讓產出時強制排在同一列，不受範本並排數限制。
+                                            _pkg_gid[0] += 1
+                                            gid = _pkg_gid[0]
                                             if use_small:
                                                 s = dict(itm)
                                                 s["quantity"] = int(pkg)
+                                                s["_pkg_group"] = gid
                                                 new_items.append(s)
                                                 new_items.append(dict(s))
                                             if use_large:
-                                                new_items.append(dict(itm))
+                                                l = dict(itm)
+                                                l["_pkg_group"] = gid
+                                                new_items.append(l)
                                     new_o["items"] = new_items
                                     result.append(new_o)
                                 return result

@@ -432,6 +432,38 @@ def _fill_value(cell_info: dict, item: dict, order: dict, seq: int) -> str | Non
         return _get_value(item, order, field, seq)
 
 
+def _fix_company_typo(v):
+    """範本常見錯字修正：股分有限公司 → 股份有限公司。"""
+    if isinstance(v, str):
+        return v.replace('股分有限公司', '股份有限公司')
+    return v
+
+
+def _group_items_for_row(item_dicts: list[dict], units_per_row: int) -> list[list[int]]:
+    """
+    把品項依 units_per_row 分組成列（回傳每列的 index list）。
+    有 "_pkg_group" 標記的品項（分裝功能拆出來的小/大標籤）強制放在同一列並排，
+    即使數量超過 units_per_row 也不拆開；其餘品項照舊依 units_per_row 塞滿一列。
+    """
+    groups: list[list[int]] = []
+    i, n = 0, len(item_dicts)
+    while i < n:
+        tag = item_dicts[i].get("_pkg_group")
+        if tag is not None:
+            idxs = []
+            while i < n and item_dicts[i].get("_pkg_group") == tag:
+                idxs.append(i)
+                i += 1
+            groups.append(idxs)
+        else:
+            idxs = []
+            while len(idxs) < units_per_row and i < n and item_dicts[i].get("_pkg_group") is None:
+                idxs.append(i)
+                i += 1
+            groups.append(idxs)
+    return groups
+
+
 def _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info: dict, orders: list[dict],
                                 logo_imgs: list = None, skip_images: bool = False,
                                 vendor: str = ""):
@@ -452,12 +484,20 @@ def _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info: dict, orders: li
     data_cells = [c for c in cells_info
                   if not c.get("is_header") and c.get("field", "__fixed__") != "__fixed__"]
 
-    # 欄寬：從 template 直接讀
+    all_items = [(item, order) for order in orders for item in order.get("items", [])]
+    row_groups = _group_items_for_row([item for item, _o in all_items], units_per_row)
+
+    # 欄寬：從 template 直接讀。分裝的小/大標籤群組可能超過 units_per_row（例如 2 小 1 大要 3 欄並排），
+    # 欄寬要涵蓋實際用到的最大並排數，不能只依 units_per_row。
+    # LSCR 印表機廠商（跟 LSCR 共用同一台標籤機）強制每欄都是 25，不採用範本原本的欄寬。
+    max_slots = max([units_per_row] + [len(g) for g in row_groups]) if row_groups else units_per_row
     for c_off in range(columns_per_unit):
         tmpl_letter = get_column_letter(first_unit_start_col + c_off)
-        width = ws_tmpl.column_dimensions[tmpl_letter].width \
-                if tmpl_letter in ws_tmpl.column_dimensions else 10
-        for ui in range(units_per_row):
+        width = 25.0 if use_lscr_layout else (
+            ws_tmpl.column_dimensions[tmpl_letter].width
+            if tmpl_letter in ws_tmpl.column_dimensions else 10
+        )
+        for ui in range(max_slots):
             out_col = ui * (columns_per_unit + gap_cols) + c_off + 1
             ws_out.column_dimensions[get_column_letter(out_col)].width = width
 
@@ -468,14 +508,14 @@ def _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info: dict, orders: li
             first_unit_start_col <= m.min_col < first_unit_start_col + columns_per_unit)
     ]
 
-    all_items = [(item, order) for order in orders for item in order.get("items", [])]
     if logo_imgs is None:
         logo_imgs = _extract_logo_images(ws_tmpl)  # OneCellAnchor logos
     current_row = 1
+    global_seq = 0
 
-    # 每列放不同品項（最多 units_per_row 張），不重複
-    for group_start in range(0, len(all_items), units_per_row):
-        group = all_items[group_start:group_start + units_per_row]
+    # 每列放不同品項；分裝拆出的小/大標籤群組強制並排在同一列，其餘依 units_per_row 塞滿
+    for group_idxs in row_groups:
+        group = [all_items[idx] for idx in group_idxs]
 
         # 行高：LSCR 印表機廠商強制用固定行高（跟 write_lscr_labels 一致），否則沿用範本行高
         if use_lscr_layout:
@@ -488,7 +528,8 @@ def _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info: dict, orders: li
                     ws_out.row_dimensions[current_row + int(ri_str) - 1].height = h
 
         for ui, (item, order) in enumerate(group):
-            seq = group_start + ui + 1
+            global_seq += 1
+            seq = global_seq
             base_col = ui * (columns_per_unit + gap_cols)
 
             # 1. 複製 template 所有格子（保留值 + 樣式）
@@ -497,7 +538,7 @@ def _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info: dict, orders: li
                     src = ws_tmpl.cell(row=r, column=first_unit_start_col + c_off)
                     dst = ws_out.cell(row=current_row + r - 1, column=base_col + c_off + 1)
                     if src.value is not None:
-                        dst.value = src.value
+                        dst.value = _fix_company_typo(src.value)
                     try:
                         if src.font:
                             dst.font = copy.copy(src.font)
@@ -845,7 +886,6 @@ def _inject_drawings_zip_level(
         columns_per_unit_p   = tinfo.get("columns_per_unit", 1)
         first_unit_col0_p    = tinfo.get("first_unit_start_col", 1) - 1  # 0-based, matches drawing XML <xdr:col>
         use_lscr_layout_p    = vendor_p in _LSCR_PRINTER_VENDORS
-        n_items_p            = len(order_p.get("items", []))
 
         # find output sheet list index
         if out_ws_name in out_sheet_names_order:
@@ -986,12 +1026,14 @@ def _inject_drawings_zip_level(
 
                 new_anchor_parts: list[str] = []
                 if label_anchors:
+                    # 分組邏輯要跟 _write_passthrough_to_sheet 完全一致，
+                    # 否則分裝的小/大標籤並排列會跟 LOGO 位置對不上。
+                    item_dicts_p = order_p.get("items", []) or [{}]
+                    row_groups_p = _group_items_for_row(item_dicts_p, units_per_row_p)
                     out_row = 1
-                    total = max(n_items_p, 1)
-                    for group_start in range(0, total, units_per_row_p):
-                        group_size = min(units_per_row_p, total - group_start)
+                    for group_idxs in row_groups_p:
                         row_off = out_row - 1
-                        for ui in range(group_size):
+                        for ui in range(len(group_idxs)):
                             col_off = ui * (columns_per_unit_p + gap_cols_p)
                             for a_xml in label_anchors:
                                 new_anchor_parts.append(_shift_anchor(a_xml, row_off, col_off))
@@ -1588,10 +1630,7 @@ def write_lscr_labels(
                 src = ws_tmpl.cell(row=r, column=first_unit_start_col + c_off)
                 dst = ws_out.cell(row=out_row + r - 1, column=base_col + c_off + 1)
                 if src.value is not None:
-                    v = src.value
-                    if isinstance(v, str):
-                        v = v.replace('股分有限公司', '股份有限公司')
-                    dst.value = v
+                    dst.value = _fix_company_typo(src.value)
                 try:
                     if src.font:      dst.font      = copy.copy(src.font)
                     if src.fill and getattr(src.fill, 'fill_type', None) not in (None, 'none'):
