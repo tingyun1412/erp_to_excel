@@ -792,6 +792,10 @@ def _inject_drawings_zip_level(
         m = _re.search(r'<xdr:from>.*?<xdr:row>(\d+)</xdr:row>', a, _re.DOTALL)
         return int(m.group(1)) if m else 9999
 
+    def _anchor_from_col(a: str) -> int:
+        m = _re.search(r'<xdr:from>.*?<xdr:col>(\d+)</xdr:col>', a, _re.DOTALL)
+        return int(m.group(1)) if m else 9999
+
     def _shift_anchor(a: str, row_off: int, col_off: int = 0) -> str:
         def _inc_row(m): return f'<xdr:row>{int(m.group(1)) + row_off}</xdr:row>'
         result = _re.sub(r'<xdr:row>(\d+)</xdr:row>', _inc_row, a)
@@ -839,6 +843,7 @@ def _inject_drawings_zip_level(
         units_per_row_p      = tinfo.get("units_per_row", 1) or 1
         gap_cols_p           = tinfo.get("gap_cols", 1)
         columns_per_unit_p   = tinfo.get("columns_per_unit", 1)
+        first_unit_col0_p    = tinfo.get("first_unit_start_col", 1) - 1  # 0-based, matches drawing XML <xdr:col>
         use_lscr_layout_p    = vendor_p in _LSCR_PRINTER_VENDORS
         n_items_p            = len(order_p.get("items", []))
 
@@ -964,11 +969,20 @@ def _inject_drawings_zip_level(
                         new_drawing_rels_xml = new_drawing_rels_xml.replace(
                             f'Target="{old_t}"', f'Target="{new_t}"')
 
-                # ── 只保留單一標籤範圍內的 anchor（rel_row < unit_rows），
-                #    再依實際產出的標籤數量/欄位偏移逐一複製並位移，
-                #    避免只有一個標籤時，模板裡其他列的 anchor 也被原封不動整批複製過去。
+                # ── 只保留「第一個標籤單元」範圍內的 anchor（row < unit_rows 且
+                #    col 落在 first_unit_start_col..+columns_per_unit），再依實際產出的
+                #    標籤數量/欄位偏移逐一複製並位移。
+                #    避免兩種情況：
+                #    1. 只有一個標籤時，模板裡其他列的 anchor 也被原封不動整批複製過去。
+                #    2. 範本本身就有多份並排樣本（units_per_row>1）時，第二份樣本自帶的 LOGO
+                #       落在別的欄位，被誤當成「也要跟著每個 slot 複製」的 logo，
+                #       導致只有一張標籤時右邊仍多出一張沒被位移過的 LOGO。
+                # 欄位上限含 gap_cols：logo 常放在偵測為「分隔欄」的裝飾欄，
+                # 只排除真正屬於下一個並排單元的欄位。
+                _col_upper_p = first_unit_col0_p + columns_per_unit_p + gap_cols_p
                 label_anchors = [a for a in _anchor_pat.findall(drawing_xml_raw)
-                                 if _anchor_from_row(a) < unit_rows_p]
+                                 if _anchor_from_row(a) < unit_rows_p
+                                 and first_unit_col0_p <= _anchor_from_col(a) < _col_upper_p]
 
                 new_anchor_parts: list[str] = []
                 if label_anchors:

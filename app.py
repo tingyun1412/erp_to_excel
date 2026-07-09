@@ -5,7 +5,6 @@
   B - 標籤模板管理（上傳舊標籤 → 設定欄位 → 產出新標籤）
 """
 import json
-import math
 import re
 import tempfile
 from io import BytesIO
@@ -273,7 +272,11 @@ with tab_label:
                     with st.expander("📦 分裝設定"):
                         _pkg_enable = st.checkbox("啟用分裝", key="pkg_enable")
                         if _pkg_enable:
-                            st.caption("填入每箱數量；若每箱數量 ≥ 總數量表示只有一箱，只印一張標籤")
+                            st.caption(
+                                "填入每箱數量；若每箱數量 ≥ 總數量表示只有一箱，只印一張標籤。"
+                                "否則固定印出 2 張小標籤（顯示每箱數量）+ 1 張大標籤（顯示總數量）並排，"
+                                "不會依箱數自動算張數——實際要印幾份由印標籤的人自己決定。"
+                            )
                             _pkg_df = pd.DataFrame([
                                 {
                                     "料號":   itm.get("item_no", ""),
@@ -343,12 +346,13 @@ with tab_label:
                                             # 只有一箱，印一張
                                             new_items.append(dict(itm))
                                         else:
-                                            n = math.ceil(total / pkg)
+                                            # 固定 2 張小標籤（每箱數量）+ 1 張大標籤（總數量）並排，
+                                            # 不論每箱數量填多少都印 3 張——箱數由印標籤的人自己決定
                                             if use_small:
-                                                for _ in range(n):
-                                                    s = dict(itm)
-                                                    s["quantity"] = int(pkg)
-                                                    new_items.append(s)
+                                                s = dict(itm)
+                                                s["quantity"] = int(pkg)
+                                                new_items.append(s)
+                                                new_items.append(dict(s))
                                             if use_large:
                                                 new_items.append(dict(itm))
                                     new_o["items"] = new_items
