@@ -961,6 +961,7 @@ async function copyLabel_{btn_id}(){{
                                         _lscr_tmpl_info,
                                         include_small=_lscr_small,
                                         include_large=_lscr_large,
+                                        tmpl_bytes=_lscr_bytes,
                                     )
                                     st.download_button(
                                         "⬇️ 下載標籤.xlsx",

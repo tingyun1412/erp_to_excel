@@ -143,13 +143,14 @@ def generate_invoice_excel(
             name = item.get("name", "")
             spec = item.get("description", "")
             desc = (name + " " + spec).strip() or item.get("item_no", "")
-            desc2    = item.get("remark", "") or ""
-            relno1   = item.get("item_no", "")
+            desc2  = item.get("remark", "") or ""
+            relno1 = order.get("customer_order_no", "") or order.get("order_no", "")
+            relno2 = item.get("remark", "") or ""
 
             det_vals = [
-                inv_no, idx, desc, desc2 if desc2 else "",
+                inv_no, idx, desc, desc2,
                 qty, unit, up, amt,
-                relno1, "",
+                relno1, relno2,
             ]
             for col, val in enumerate(det_vals):
                 style = _DAT_L if col == 2 else _DAT
