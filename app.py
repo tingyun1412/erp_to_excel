@@ -449,6 +449,7 @@ with tab_label:
                     else:
                         saved, skipped = 0, 0
                         sync_errors = []
+                        first_sync_err = None
                         for sname, info in results.items():
                             try:
                                 vendor = new_customer.strip() or sname
@@ -456,6 +457,7 @@ with tab_label:
                                 _err = save_template(vendor, tname, template_to_json(info), excel_bytes=tmpl_bytes)
                                 if _err:
                                     sync_errors.append(f"{vendor} — {tname}")
+                                    first_sync_err = first_sync_err or _err
                                 tmpl_key = f"{vendor}_{tname}"
                                 st.session_state.template_wb_bytes[tmpl_key] = tmpl_bytes
                                 saved += 1
@@ -467,10 +469,11 @@ with tab_label:
                             st.warning(
                                 "⚠️ 以下模板的原始 Excel 未能同步到雲端（僅存在目前分頁的暫存中）："
                                 + "、".join(sync_errors)
-                                + "。下次重新整理或換裝置時會需要重新上傳，請到「現有模板」用"
-                                "「🔄 重新分析」補傳一次即可。"
+                                + "。下次重新整理或換裝置時會需要重新上傳。"
+                                f"\n\n錯誤訊息：{first_sync_err}"
                             )
-                        st.rerun()
+                        else:
+                            st.rerun()
             else:
                 selected_sheet = st.selectbox("選擇要分析的工作表", sheet_names)
                 if st.button("分析模板", type="primary"):
@@ -597,11 +600,11 @@ with tab_label:
                     st.success(f"模板「{customer} — {tmpl_name}」已儲存！")
                     if _sync_err:
                         st.warning(
-                            f"⚠️ 原始 Excel 未能同步到雲端（{_sync_err}），"
-                            "重新整理頁面或換裝置後會需要重新上傳，請稍後到「現有模板」"
-                            "用「🔄 重新分析」補傳一次。"
+                            f"⚠️ 原始 Excel 未能同步到雲端，重新整理頁面或換裝置後會需要重新上傳。\n\n"
+                            f"錯誤訊息：{_sync_err}"
                         )
-                    st.rerun()
+                    else:
+                        st.rerun()
                 except Exception as e:
                     st.error(f"儲存失敗：{e}")
 
@@ -661,8 +664,12 @@ with tab_label:
                                 clear_cache()
                                 st.success(f"重新分析完成，找到 {len([c for c in _re_info['cells'] if c['field']!='__fixed__'])} 個動態欄位")
                                 if _re_err:
-                                    st.warning(f"⚠️ 原始 Excel 未能同步到雲端（{_re_err}），下次重新整理可能又要重傳一次。")
-                                st.rerun()
+                                    st.warning(
+                                        f"⚠️ 原始 Excel 未能同步到雲端，下次重新整理可能又要重傳一次。\n\n"
+                                        f"錯誤訊息：{_re_err}"
+                                    )
+                                else:
+                                    st.rerun()
                             else:
                                 st.error("分析失敗，此工作表無內容")
         except Exception as e:
