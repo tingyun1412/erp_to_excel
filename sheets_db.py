@@ -9,11 +9,13 @@ _TW = timezone(timedelta(hours=8))
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
+from google.oauth2.credentials import Credentials as UserCredentials
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
+_DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 SPREADSHEET_ID    = "15RRGc0Kmxr6w8cithjEOYJGnmPuWFy9eTBXElVBaR0Y"
 SHEET_TEMPLATES   = "標籤模板"
@@ -46,10 +48,22 @@ def get_client():
 
 @st.cache_resource
 def _get_drive_session():
-    """AuthorizedSession for raw Drive REST calls."""
+    """
+    AuthorizedSession for raw Drive REST calls。
+    改用真人 Google 帳號的 OAuth refresh_token（見 gen_drive_refresh_token.py），
+    而非 service account —— service account 沒有 My Drive 儲存額度，上傳一律 403
+    （即使資料夾有分享給它也一樣，因為新檔案的擁有者/額度算在建立者身上）。
+    """
     from google.auth.transport.requests import AuthorizedSession  # type: ignore
-    creds_dict = dict(st.secrets["gcp_service_account"])
-    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    oauth = st.secrets["gcp_oauth"]
+    creds = UserCredentials(
+        token=None,
+        refresh_token=oauth["refresh_token"],
+        client_id=oauth["client_id"],
+        client_secret=oauth["client_secret"],
+        token_uri="https://oauth2.googleapis.com/token",
+        scopes=_DRIVE_SCOPES,
+    )
     return AuthorizedSession(creds)
 
 

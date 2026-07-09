@@ -11,3 +11,6 @@ venv/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Google OAuth 一次性授權用（含 client secret，不可上傳）
+client_secret.json

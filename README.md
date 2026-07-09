@@ -31,6 +31,17 @@ auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
 client_x509_cert_url = "https://www.googleapis.com/robot/v1/metadata/x509/erp-995%40erptoexcel.iam.gserviceaccount.com"
 ```
 
+模板 Excel 存 Google Drive 這部分**不能用上面的 service account**（它沒有 My Drive 儲存額度，上傳會 403）。
+改用一個真人 Google 帳號（例如另外申請的 mobanchucun@gmail.com）授權，跑一次 `gen_drive_refresh_token.py`
+（步驟見檔案內註解）取得 refresh_token 後，一併貼進 Secrets：
+
+```toml
+[gcp_oauth]
+client_id = "xxxxx.apps.googleusercontent.com"
+client_secret = "xxxxx"
+refresh_token = "xxxxx"
+```
+
 4. Deploy → 拿到網址給同事用
 
 ---
