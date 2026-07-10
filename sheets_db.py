@@ -208,6 +208,16 @@ def download_template_excel(file_id: str) -> bytes:
     return r.content
 
 
+def delete_template_excel(file_id: str):
+    """從 Google Drive 刪除模板 Excel 檔案（刪模板時一併清掉雲端檔案，避免孤兒檔案）。"""
+    if not file_id:
+        return
+    session = _get_drive_session()
+    r = session.delete(f"https://www.googleapis.com/drive/v3/files/{file_id}")
+    if r.status_code not in (200, 204, 404):  # 404 視為已經不存在，不算失敗
+        _raise_with_body(r)
+
+
 # ── 標籤模板 ──────────────────────────────────────────────────────
 
 @st.cache_data(ttl=120)
@@ -220,9 +230,17 @@ def load_templates(customer: str = "") -> list[dict]:
 
 
 def save_template(customer: str, template_name: str, config_json: str,
-                  excel_bytes: bytes = None) -> str | None:
+                  excel_bytes: bytes = None,
+                  original_customer: str = None,
+                  original_template_name: str = None) -> str | None:
     """
     儲存模板設定到 Sheets；若有 excel_bytes 則同步上傳到 Drive。
+
+    original_customer / original_template_name：編輯既有模板時，傳入該模板「原本」的
+    廠商名稱／模板名稱，用來找出要更新的那一列——即使這次把 customer/template_name
+    改成別的名字（改名），也會直接更新原本那一列，而不是另外新增一列、
+    留下改名前的舊列變成孤兒資料。新增模板時不用傳這兩個參數。
+
     回傳值：Drive 上傳失敗時回傳錯誤訊息字串（設定 JSON 仍會存檔），成功則回傳 None。
     呼叫端應檢查回傳值並提示使用者，否則下次重開瀏覽器會因為 Excel 沒同步到雲端
     而需要重新上傳（Excel檔案ID 欄位是空的）。
@@ -240,21 +258,32 @@ def save_template(customer: str, template_name: str, config_json: str,
         except Exception as e:
             upload_error = str(e)
 
+    match_customer = original_customer if original_customer is not None else customer
+    match_name     = original_template_name if original_template_name is not None else template_name
+
     for i, r in enumerate(records):
-        if r.get("廠商名稱") == customer and r.get("模板名稱") == template_name:
+        if r.get("廠商名稱") == match_customer and r.get("模板名稱") == match_name:
             keep_fid = file_id or r.get("Excel檔案ID", "")
-            _retry(lambda: ws.update(f"C{i+2}:E{i+2}", [[config_json, now, keep_fid]]))
+            _retry(lambda: ws.update(f"A{i+2}:E{i+2}",
+                                     [[customer, template_name, config_json, now, keep_fid]]))
             return upload_error
     _retry(lambda: ws.append_row([customer, template_name, config_json, now, file_id]))
     return upload_error
 
 
 def delete_template(customer: str, template_name: str):
+    """刪除模板設定列，若有同步到雲端的 Excel 檔案也一併刪除，不留孤兒檔案。"""
     ws = get_sheet(SHEET_TEMPLATES)
     records = _rows_to_records(_retry(ws.get_all_values), TEMPLATES_HEADERS)
     for i, r in enumerate(records):
         if r.get("廠商名稱") == customer and r.get("模板名稱") == template_name:
             _retry(lambda: ws.delete_rows(i + 2))
+            file_id = r.get("Excel檔案ID", "")
+            if file_id:
+                try:
+                    delete_template_excel(file_id)
+                except Exception:
+                    pass  # Sheet 那列已經刪掉了，雲端檔案刪不掉不阻擋這次操作
             return
 
 

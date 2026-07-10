@@ -497,6 +497,7 @@ with tab_label:
                         st.session_state["_pending_tmpl_bytes"] = tmpl_bytes
                         st.session_state["_pending_customer"] = new_customer.strip() or selected_sheet
                         st.session_state["_pending_tmpl_name"] = new_tmpl_name.strip() or selected_sheet
+                        st.session_state["_pending_is_edit"] = False
 
         # 欄位對應確認
         if "_pending_template" in st.session_state:
@@ -507,19 +508,24 @@ with tab_label:
             st.markdown("### 確認欄位對應")
             st.caption("檢查每個格子的欄位是否正確，可以修改")
 
-            # 名稱可編輯（新增時預填，編輯時可改名）
+            # 名稱可編輯（新增時預填，編輯時可改名）。
+            # widget key 帶入原始名稱，確保切換到編輯「另一個」模板時輸入框會重置成新模板的名稱，
+            # 不會沿用上一個模板編輯時殘留的文字（否則存檔時會誤判成新模板，另外新增一列）。
+            _pending_key_suffix = (
+                f"{st.session_state.get('_pending_customer','')}_{st.session_state.get('_pending_tmpl_name','')}"
+            )
             _ec1, _ec2 = st.columns(2)
             with _ec1:
                 _edit_customer = st.text_input(
                     "廠商名稱（用於比對）",
                     value=st.session_state.get("_pending_customer", ""),
-                    key="_edit_customer_input",
+                    key=f"_edit_customer_input_{_pending_key_suffix}",
                 )
             with _ec2:
                 _edit_tmpl_name = st.text_input(
                     "模板名稱",
                     value=st.session_state.get("_pending_tmpl_name", ""),
-                    key="_edit_tmpl_name_input",
+                    key=f"_edit_tmpl_name_input_{_pending_key_suffix}",
                 )
 
             # 標籤列數（自動偵測，可手動修正）
@@ -592,10 +598,16 @@ with tab_label:
                 customer = _edit_customer.strip() or st.session_state.get("_pending_customer", "")
                 tmpl_name = _edit_tmpl_name.strip() or st.session_state.get("_pending_tmpl_name", "")
                 tmpl_key = f"{customer}_{tmpl_name}"
+                _is_edit = st.session_state.get("_pending_is_edit", False)
+                _orig_customer = st.session_state.get("_pending_customer", "") if _is_edit else None
+                _orig_tmpl_name = st.session_state.get("_pending_tmpl_name", "") if _is_edit else None
 
                 try:
                     _wb_bytes = st.session_state.get("_pending_tmpl_bytes") or b""
-                    _sync_err = save_template(customer, tmpl_name, config_json, excel_bytes=_wb_bytes or None)
+                    _sync_err = save_template(
+                        customer, tmpl_name, config_json, excel_bytes=_wb_bytes or None,
+                        original_customer=_orig_customer, original_template_name=_orig_tmpl_name,
+                    )
                     # 快取 workbook bytes
                     st.session_state.template_wb_bytes[tmpl_key] = _wb_bytes
                     # 清除暫存
@@ -603,6 +615,7 @@ with tab_label:
                     del st.session_state["_pending_tmpl_bytes"]
                     del st.session_state["_pending_customer"]
                     del st.session_state["_pending_tmpl_name"]
+                    st.session_state.pop("_pending_is_edit", None)
                     clear_cache()
                     st.success(f"模板「{customer} — {tmpl_name}」已儲存！")
                     if _sync_err:
@@ -641,6 +654,7 @@ with tab_label:
                                 )
                                 st.session_state["_pending_customer"] = r["廠商名稱"]
                                 st.session_state["_pending_tmpl_name"] = r["模板名稱"]
+                                st.session_state["_pending_is_edit"] = True
                                 st.rerun()
                         with _btn_del:
                             if st.button("🗑 刪除此模板", key=f"del_{r['廠商名稱']}_{r['模板名稱']}"):
