@@ -218,6 +218,63 @@ def delete_template_excel(file_id: str):
         _raise_with_body(r)
 
 
+# ── LSCR 預設模板（模板0）──────────────────────────────────────────
+# 獨立存放在同一個 Drive 資料夾，不寫入「標籤模板」Sheet，
+# 所以不會出現在「管理模板」分頁的列表中。
+
+_LSCR_BASE_TEMPLATE_FILENAME = "LSCR_模板0.xlsx"
+
+
+def find_lscr_base_template_id() -> str:
+    """尋找雲端既有的 LSCR 模板0 檔案 ID；不存在回傳空字串。"""
+    session = _get_drive_session()
+    folder_id = _drive_folder_id()
+    q = f"name='{_LSCR_BASE_TEMPLATE_FILENAME}' and '{folder_id}' in parents and trashed=false"
+    r = session.get("https://www.googleapis.com/drive/v3/files",
+                    params={"q": q, "fields": "files(id)"})
+    _raise_with_body(r)
+    files = r.json().get("files", [])
+    return files[0]["id"] if files else ""
+
+
+def save_lscr_base_template(excel_bytes: bytes) -> str:
+    """把第一次上傳、含 lable 工作表的 LSCR 檔案存成雲端預設模板（模板0）。
+    只在雲端還沒有模板0 時呼叫，之後不會覆蓋。回傳新檔案 ID。"""
+    import json as _json
+    session = _get_drive_session()
+    folder_id = _drive_folder_id()
+    boundary = "===XLBOUNDARY==="
+    metadata = _json.dumps({"name": _LSCR_BASE_TEMPLATE_FILENAME, "parents": [folder_id]})
+    body = (
+        f"--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n"
+        + metadata
+        + f"\r\n--{boundary}\r\nContent-Type: {_EXCEL_MIME}\r\n\r\n"
+    ).encode("utf-8") + excel_bytes + f"\r\n--{boundary}--".encode("utf-8")
+    r = session.post(
+        "https://www.googleapis.com/upload/drive/v3/files",
+        params={"uploadType": "multipart", "fields": "id"},
+        headers={"Content-Type": f"multipart/related; boundary={boundary}"},
+        data=body,
+    )
+    _raise_with_body(r)
+    return r.json().get("id", "")
+
+
+@st.cache_data(ttl=3600)
+def download_lscr_base_template() -> bytes:
+    """下載雲端 LSCR 模板0 的 Excel bytes；不存在回傳 b''（每個 session 快取 1 小時）。"""
+    file_id = find_lscr_base_template_id()
+    if not file_id:
+        return b""
+    session = _get_drive_session()
+    r = session.get(
+        f"https://www.googleapis.com/drive/v3/files/{file_id}",
+        params={"alt": "media"},
+    )
+    _raise_with_body(r)
+    return r.content
+
+
 # ── 標籤模板 ──────────────────────────────────────────────────────
 
 @st.cache_data(ttl=120)
@@ -295,6 +352,7 @@ def clear_cache():
         pass
     try:
         download_template_excel.clear()
+        download_lscr_base_template.clear()
         _drive_folder_id.clear()
     except Exception:
         pass

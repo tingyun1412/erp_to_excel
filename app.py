@@ -42,6 +42,7 @@ from sheets_db import (
     clear_cache,
     load_vendors, save_vendor, delete_vendor,
     download_template_excel,
+    find_lscr_base_template_id, save_lscr_base_template, download_lscr_base_template,
 )
 
 st.set_page_config(page_title="出貨自動化工具", page_icon="📦", layout="wide")
@@ -949,7 +950,8 @@ async function copyLabel_{btn_id}(){{
 
     # ── LSCR 確認單直接產出 ────────────────────────────────────────
     with sub_tab_lscr:
-        st.caption("上傳 LSCR 出貨明細確認單（xlsx），自動解析明細並用內建 lable 工作表產出標籤")
+        st.caption("上傳 LSCR 出貨明細確認單（xlsx），自動解析明細並用內建 lable 工作表產出標籤"
+                   "（若檔案只有 list 沒有 lable，會自動沿用雲端的預設模板0）")
 
         _lscr_up = st.file_uploader(
             "上傳 LSCR 確認單 xlsx",
@@ -961,12 +963,35 @@ async function copyLabel_{btn_id}(){{
             _lscr_bytes = _lscr_up.read()
             try:
                 _wb_data = openpyxl.load_workbook(BytesIO(_lscr_bytes), data_only=True)
-                _wb_tmpl = openpyxl.load_workbook(BytesIO(_lscr_bytes))
 
-                _missing = [s for s in ("list", "lable") if s not in _wb_data.sheetnames]
-                if _missing:
-                    st.error(f"此檔案缺少工作表：{', '.join(_missing)}（需要 'list' 和 'lable'）")
+                if "list" not in _wb_data.sheetnames:
+                    st.error("此檔案缺少工作表：list")
+                    _tmpl_bytes = None
+                elif "lable" in _wb_data.sheetnames:
+                    # 這次上傳的檔案自帶 lable：直接用它，並在雲端還沒有模板0 時存一份
+                    # （只存第一次，之後不再覆蓋，避免之後上傳的檔案版型跑掉時把模板0 也帶壞）
+                    _tmpl_bytes = _lscr_bytes
+                    try:
+                        if not find_lscr_base_template_id():
+                            save_lscr_base_template(_lscr_bytes)
+                            download_lscr_base_template.clear()
+                            st.info("已將本次的 lable 版型另存為雲端預設模板0，"
+                                    "之後上傳只有 list 的檔案會自動沿用。")
+                    except Exception as _sav_e:
+                        st.warning(f"雲端模板0 儲存失敗（不影響本次產出）：{_sav_e}")
                 else:
+                    # 檔案只有 list 沒有 lable：沿用雲端的預設模板0
+                    _base_bytes = download_lscr_base_template()
+                    if _base_bytes:
+                        _tmpl_bytes = _base_bytes
+                        st.caption("此檔案沒有 lable 工作表，已自動沿用雲端預設模板0 排版")
+                    else:
+                        st.error("此檔案缺少工作表：lable，且雲端尚無預設模板0 可沿用"
+                                 "（請先上傳一份含 lable 工作表的檔案，之後才能沿用）")
+                        _tmpl_bytes = None
+
+                if _tmpl_bytes:
+                    _wb_tmpl = openpyxl.load_workbook(BytesIO(_tmpl_bytes))
                     _lscr_orders = parse_lscr_excel_wb(_wb_data)
                     _lscr_raw_items = [
                         (itm, o)
@@ -1021,11 +1046,11 @@ async function copyLabel_{btn_id}(){{
                                 else:
                                     _buf = write_lscr_labels(
                                         _lscr_orders,
-                                        openpyxl.load_workbook(BytesIO(_lscr_bytes)),
+                                        openpyxl.load_workbook(BytesIO(_tmpl_bytes)),
                                         _lscr_tmpl_info,
                                         include_small=_lscr_small,
                                         include_large=_lscr_large,
-                                        tmpl_bytes=_lscr_bytes,
+                                        tmpl_bytes=_tmpl_bytes,
                                     )
                                     st.download_button(
                                         "⬇️ 下載標籤.xlsx",
