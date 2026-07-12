@@ -484,6 +484,12 @@ def _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info: dict, orders: li
     data_cells = [c for c in cells_info
                   if not c.get("is_header") and c.get("field", "__fixed__") != "__fixed__"]
 
+    # KV-pair 後處理會把「標籤：樣本值」的格子降級成 __fixed__，但分析時已經把
+    # cells_info 存成去掉樣本值的純標籤（例如「思達料號：」）。複製 template 格子時
+    # 若直接讀 ws_tmpl 的原始值，會把樣本值也原封不動複製過去；改用 cells_info 的值
+    # 才能正確去除舊樣本內容。
+    cell_value_overrides = {(c["row"], c["col"]): c["value"] for c in cells_info}
+
     all_items = [(item, order) for order in orders for item in order.get("items", [])]
     row_groups = _group_items_for_row([item for item, _o in all_items], units_per_row)
 
@@ -537,8 +543,10 @@ def _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info: dict, orders: li
                 for c_off in range(columns_per_unit):
                     src = ws_tmpl.cell(row=r, column=first_unit_start_col + c_off)
                     dst = ws_out.cell(row=current_row + r - 1, column=base_col + c_off + 1)
-                    if src.value is not None:
-                        dst.value = _fix_company_typo(src.value)
+                    override = cell_value_overrides.get((r, c_off + 1))
+                    value_to_write = override if override is not None else src.value
+                    if value_to_write is not None:
+                        dst.value = _fix_company_typo(value_to_write)
                     try:
                         if src.font:
                             dst.font = copy.copy(src.font)
