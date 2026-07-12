@@ -33,6 +33,8 @@ from sheets_db import (
     load_vendors, save_vendor, delete_vendor,
     download_template_excel,
     find_lscr_base_template_id, save_lscr_base_template, download_lscr_base_template,
+    load_invoice_skip_list, save_invoice_skip, delete_invoice_skip,
+    load_invoice_counter, save_invoice_counter,
 )
 
 st.set_page_config(page_title="出貨自動化工具", page_icon="📦", layout="wide")
@@ -1076,7 +1078,8 @@ with tab_invoice:
             st.info("請先在左側上傳並解析銷貨單")
         else:
             order_map = {
-                f"{o.get('order_no','')} — {o.get('customer_code','')} ({len(o.get('items',[]))} 項)": o
+                f"{o.get('order_no','')} — {o.get('customer_name') or o.get('customer_code','')} "
+                f"({len(o.get('items',[]))} 項)": o
                 for o in all_orders
             }
             selected_keys = st.multiselect(
@@ -1086,22 +1089,125 @@ with tab_invoice:
             )
             selected_orders = [order_map[k] for k in selected_keys if order_map[k].get("items")]
 
+            # ── 跳過名單管理（例如：不開立發票的客戶、月結另外處理的客戶）──
+            with st.expander("⚙️ 發票跳過名單管理"):
+                _skip_list = load_invoice_skip_list()
+                if _skip_list:
+                    st.dataframe(
+                        [{"客戶名稱": r.get("客戶名稱",""), "原因": r.get("原因","")} for r in _skip_list],
+                        use_container_width=True, hide_index=True,
+                    )
+                    _del_target = st.selectbox(
+                        "選擇要刪除的客戶",
+                        [""] + [r.get("客戶名稱","") for r in _skip_list],
+                        key="inv_skip_del_sel",
+                    )
+                    if _del_target and st.button("刪除選定客戶", key="inv_skip_del_btn"):
+                        delete_invoice_skip(_del_target)
+                        clear_cache()
+                        st.rerun()
+                else:
+                    st.caption("目前沒有跳過名單")
+
+                _sc1, _sc2, _sc3 = st.columns([2, 1, 1])
+                with _sc1:
+                    _new_skip_name = st.text_input(
+                        "客戶名稱（比對銷貨單客戶名稱，包含即算符合）", key="inv_skip_new_name")
+                with _sc2:
+                    _new_skip_reason = st.text_input(
+                        "原因", value="不開立", key="inv_skip_new_reason")
+                with _sc3:
+                    st.write("")
+                    st.write("")
+                    if st.button("新增", key="inv_skip_add_btn", use_container_width=True) and _new_skip_name.strip():
+                        save_invoice_skip(_new_skip_name.strip(), _new_skip_reason.strip() or "不開立")
+                        clear_cache()
+                        st.rerun()
+
+            def _match_skip(customer: str) -> str | None:
+                cn = (customer or "").strip()
+                if not cn:
+                    return None
+                for r in _skip_list:
+                    sn = r.get("客戶名稱", "").strip()
+                    if sn and (sn in cn or cn in sn):
+                        return r.get("原因") or "跳過"
+                return None
+
+            _skipped = []       # (order, reason)
+            _eligible = []
+            for o in selected_orders:
+                reason = _match_skip(o.get("customer_name") or o.get("customer_code"))
+                if reason:
+                    _skipped.append((o, reason))
+                else:
+                    _eligible.append(o)
+
+            # ── 發票號碼設定（沒有發票號碼的銷貨單，自動依序填號用）──
+            st.markdown("**發票號碼設定**（用於沒有發票號碼的銷貨單自動填號）")
+            _counter = load_invoice_counter()
+            _cur_track = _counter.get("字軌", "")
+            _cur_next_s = _counter.get("下一張號碼", "")
+            _cur_next = int(_cur_next_s) if _cur_next_s.isdigit() else None
+
+            _cc1, _cc2, _cc3 = st.columns([1, 2, 1])
+            with _cc1:
+                _track_in = st.text_input("字軌", value=_cur_track, max_chars=2, key="inv_counter_track")
+            with _cc2:
+                _next_in = st.number_input(
+                    "下一張號碼", min_value=0, step=1,
+                    value=_cur_next or 0, key="inv_counter_next")
+            with _cc3:
+                st.write("")
+                st.write("")
+                if st.button("儲存號碼設定", key="inv_counter_save", use_container_width=True):
+                    save_invoice_counter(_track_in.strip().upper(), int(_next_in))
+                    clear_cache()
+                    st.success("已更新")
+                    st.rerun()
+
+            _counter_ready = bool(_track_in.strip() and _next_in)
+
             if selected_orders:
-                _with_inv    = [o for o in selected_orders if o.get("invoice_no")]
-                _without_inv = [o for o in selected_orders if not o.get("invoice_no")]
+                _with_inv    = [o for o in _eligible if o.get("invoice_no")]
+                _without_inv = [o for o in _eligible if not o.get("invoice_no")]
 
                 if _with_inv:
-                    st.success(f"共 **{len(_with_inv)}** 張有發票號碼，將產出發票")
+                    st.success(f"共 **{len(_with_inv)}** 張已有發票號碼")
                 if _without_inv:
-                    _no_inv_nos = [o.get("order_no","(未知)") for o in _without_inv]
-                    st.warning(f"{len(_without_inv)} 張無發票號碼（略過）：{', '.join(_no_inv_nos)}")
+                    if _counter_ready:
+                        st.info(f"{len(_without_inv)} 張沒有發票號碼，產出時會自動依序填號"
+                                f"（從 {_track_in.strip().upper()}{int(_next_in)} 開始）")
+                    else:
+                        _no_inv_nos = [o.get("order_no","(未知)") for o in _without_inv]
+                        st.warning(f"{len(_without_inv)} 張無發票號碼、也尚未設定號碼起始值（略過）："
+                                   f"{', '.join(_no_inv_nos)}")
+                if _skipped:
+                    _skip_lines = [
+                        f"{o.get('order_no','(未知)')}／{o.get('customer_name') or o.get('customer_code','')}（{reason}）"
+                        for o, reason in _skipped
+                    ]
+                    st.warning(f"{len(_skipped)} 張因客戶在跳過名單中而略過：" + "、".join(_skip_lines))
 
-                st.caption("發票人統編：**24405403**　受票人統編：從銷貨單統一編號　單價：暫定 100（待確認）")
+                st.caption("發票人統編：**24405403**　受票人統編：從銷貨單統一編號")
 
-                if _with_inv and st.button("產出電子發票 xls", type="primary",
+                _can_generate = bool(_with_inv or (_without_inv and _counter_ready))
+                if _can_generate and st.button("產出電子發票 xls", type="primary",
                                            use_container_width=True, key="inv_rtf_gen"):
                     try:
-                        buf = generate_invoice_excel(_with_inv)
+                        _assigned = 0
+                        _cursor = _next_in
+                        _track = _track_in.strip().upper()
+                        if _counter_ready:
+                            for o in _without_inv:
+                                o["invoice_no"] = f"{_track}{int(_cursor)}"
+                                _cursor += 1
+                                _assigned += 1
+                        if _assigned:
+                            save_invoice_counter(_track, int(_cursor))
+                            clear_cache()
+
+                        buf = generate_invoice_excel(_with_inv + _without_inv)
                         st.download_button(
                             "⬇️ 下載電子發票上傳檔.xls",
                             data=buf,

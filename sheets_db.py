@@ -23,6 +23,11 @@ TEMPLATES_HEADERS = ["廠商名稱", "模板名稱", "設定JSON", "最後更新
 SHEET_VENDORS     = "廠商帳號"
 VENDORS_HEADERS   = ["公司名稱", "網址", "帳號", "密碼"]
 
+SHEET_INVOICE_SKIP    = "發票跳過名單"
+INVOICE_SKIP_HEADERS  = ["客戶名稱", "原因"]
+SHEET_INVOICE_COUNTER = "發票號碼設定"
+INVOICE_COUNTER_HEADERS = ["字軌", "下一張號碼", "最後更新"]
+
 _DRIVE_FOLDER     = "ERP標籤模板"
 _EXCEL_MIME       = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -89,6 +94,10 @@ def get_sheet(sheet_name: str):
             ws.append_row(TEMPLATES_HEADERS)
         elif sheet_name == SHEET_VENDORS:
             ws.append_row(VENDORS_HEADERS)
+        elif sheet_name == SHEET_INVOICE_SKIP:
+            ws.append_row(INVOICE_SKIP_HEADERS)
+        elif sheet_name == SHEET_INVOICE_COUNTER:
+            ws.append_row(INVOICE_COUNTER_HEADERS)
         return ws
 
 
@@ -351,6 +360,11 @@ def clear_cache():
     except Exception:
         pass
     try:
+        load_invoice_skip_list.clear()
+        load_invoice_counter.clear()
+    except Exception:
+        pass
+    try:
         download_template_excel.clear()
         download_lscr_base_template.clear()
         _drive_folder_id.clear()
@@ -383,3 +397,51 @@ def delete_vendor(name: str):
         if r.get("公司名稱") == name:
             _retry(lambda: ws.delete_rows(i + 2))
             return
+
+
+# ── 電子發票：跳過名單 ──────────────────────────────────────────────
+
+@st.cache_data(ttl=120)
+def load_invoice_skip_list() -> list[dict]:
+    ws = get_sheet(SHEET_INVOICE_SKIP)
+    return _rows_to_records(_retry(ws.get_all_values), INVOICE_SKIP_HEADERS)
+
+
+def save_invoice_skip(customer_name: str, reason: str):
+    ws = get_sheet(SHEET_INVOICE_SKIP)
+    records = _rows_to_records(_retry(ws.get_all_values), INVOICE_SKIP_HEADERS)
+    for i, r in enumerate(records):
+        if r.get("客戶名稱") == customer_name:
+            _retry(lambda: ws.update(f"A{i+2}:B{i+2}", [[customer_name, reason]]))
+            return
+    _retry(lambda: ws.append_row([customer_name, reason]))
+
+
+def delete_invoice_skip(customer_name: str):
+    ws = get_sheet(SHEET_INVOICE_SKIP)
+    records = _rows_to_records(_retry(ws.get_all_values), INVOICE_SKIP_HEADERS)
+    for i, r in enumerate(records):
+        if r.get("客戶名稱") == customer_name:
+            _retry(lambda: ws.delete_rows(i + 2))
+            return
+
+
+# ── 電子發票：號碼計數器 ────────────────────────────────────────────
+
+@st.cache_data(ttl=120)
+def load_invoice_counter() -> dict:
+    """回傳 {"字軌": str, "下一張號碼": str, "最後更新": str}；尚未設定過回傳空 dict。"""
+    ws = get_sheet(SHEET_INVOICE_COUNTER)
+    records = _rows_to_records(_retry(ws.get_all_values), INVOICE_COUNTER_HEADERS)
+    return records[0] if records else {}
+
+
+def save_invoice_counter(track: str, next_number: int):
+    """儲存「下一張要用的發票號碼」。永遠只保留一列（目前唯一使用中的字軌）。"""
+    ws = get_sheet(SHEET_INVOICE_COUNTER)
+    records = _rows_to_records(_retry(ws.get_all_values), INVOICE_COUNTER_HEADERS)
+    now = datetime.now(_TW).strftime("%Y/%m/%d %H:%M")
+    if records:
+        _retry(lambda: ws.update("A2:C2", [[track, str(next_number), now]]))
+    else:
+        _retry(lambda: ws.append_row([track, str(next_number), now]))

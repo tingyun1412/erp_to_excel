@@ -6,7 +6,7 @@
 - 銷貨單有發票號碼才匯入，沒有的直接跳過
 - 發票人（賣方）統編固定 24405403
 - 受票人（買方）統編從銷貨單的 buyer_tax_id 取
-- 單價暫定 100（待使用者提供價目表後更新）
+- 單價、金額直接取自銷貨單解析結果
 """
 from datetime import datetime
 from io import BytesIO
@@ -14,7 +14,6 @@ from io import BytesIO
 import xlwt
 
 SELLER_TAX_ID = "24405403"
-DEFAULT_UNIT_PRICE = 100
 
 # ── xlwt 樣式 ─────────────────────────────────────────────────────
 _HDR = xlwt.easyxf(
@@ -108,9 +107,9 @@ def generate_invoice_excel(
         if not items:
             continue
 
-        # 金額計算（單價暫定 100，未稅）
+        # 金額計算（未稅）
         total_amount = sum(
-            item.get("quantity", 0) * (item.get("unit_price") or DEFAULT_UNIT_PRICE)
+            item.get("quantity", 0) * item.get("unit_price", 0)
             for item in items
         )
         tax_amount = round(total_amount * 0.05)
@@ -137,7 +136,7 @@ def generate_invoice_excel(
         for idx, item in enumerate(items, 1):
             qty  = item.get("quantity", 1) or 1
             unit = item.get("unit", "PC")
-            up   = item.get("unit_price") or DEFAULT_UNIT_PRICE
+            up   = item.get("unit_price", 0)
             amt  = qty * up
             # 品名 = 品名 + 規格 合一
             name = item.get("name", "")
