@@ -32,7 +32,12 @@ def download_label_pdfs(
     errors: dict = {}
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
+        # Streamlit Cloud 容器沒有沙盒所需權限、/dev/shm 也很小，Chromium 預設啟動
+        # 會在沙盒初始化或共用記憶體時直接 segfault（而非丟出乾淨的例外）。
+        browser = pw.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+        )
         ctx = browser.new_context(accept_downloads=True)
         page = ctx.new_page()
         dbg = _make_debugger(page, debug_dir)
