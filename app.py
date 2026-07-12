@@ -12,17 +12,7 @@ from io import BytesIO
 import pandas as pd
 import streamlit as st
 import openpyxl
-import subprocess
-import sys
-from pathlib import Path
 
-chrome_dir = Path.home() / ".cache/ms-playwright"
-
-if not chrome_dir.exists():
-    subprocess.run(
-        [sys.executable, "-m", "playwright", "install", "chromium"],
-        check=True
-    )
 from rtf_parser import parse_sales_order_rtf
 from lscr_parser import parse_lscr_excel_wb
 from module_b_invoice import (

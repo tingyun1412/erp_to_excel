@@ -7,11 +7,25 @@ ERP 標籤自動下載
     python -m playwright install chromium
 """
 import io
+import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
 ERP_INDEX  = "http://scm.honprec.com/hp/Index.aspx"
 ERP_ORDERS = "https://scm.honprec.com/HP/MA10.aspx"   # 出貨單列表（觀察自錯誤訊息 URL）
+
+
+def _ensure_chromium_installed():
+    """惰性安裝 Chromium：只有真的要用 ERP 下載時才檢查/安裝，
+    避免每次 app 冷啟動都跑一次（不管使用者有沒有用到這個功能），
+    拖慢啟動速度、吃掉容器記憶體。"""
+    chrome_dir = Path.home() / ".cache/ms-playwright"
+    if not chrome_dir.exists():
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            check=True,
+        )
 
 
 def download_label_pdfs(
@@ -26,6 +40,7 @@ def download_label_pdfs(
       results: {order_no: pdf_bytes | None}
       errors:  {order_no: error_str}  — 失敗原因
     """
+    _ensure_chromium_installed()
     from playwright.sync_api import sync_playwright
 
     results = {no: None for no in order_nos}
