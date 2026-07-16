@@ -36,6 +36,11 @@ from sheets_db import (
     load_invoice_skip_list, save_invoice_skip, delete_invoice_skip,
     load_invoice_counter, save_invoice_counter,
 )
+from module_d_report import (
+    parse_daily_report_workbook,
+    aggregate_daily_report,
+    generate_report_excel,
+)
 
 st.set_page_config(page_title="出貨自動化工具", page_icon="📦", layout="wide")
 st.title("📦 出貨自動化工具")
@@ -98,9 +103,10 @@ with st.sidebar:
 # ════════════════════════════════════════════════════════════════
 #  主頁籤
 # ════════════════════════════════════════════════════════════════
-tab_label, tab_invoice = st.tabs([
+tab_label, tab_invoice, tab_report = st.tabs([
     "🏷 出貨標籤",
     "🧾 電子發票",
+    "📊 報表彙總",
 ])
 
 
@@ -1299,3 +1305,41 @@ with tab_invoice:
                         import traceback as _atb
                         st.error(f"產出失敗：{_ae2}")
                         st.code(_atb.format_exc())
+
+
+# ════════════════════════════════════════════════════════════════
+#  報表彙總
+# ════════════════════════════════════════════════════════════════
+with tab_report:
+    st.caption("上傳生產日報表 Excel（各站/各人員工作表），依「日期＋料號＋站」彙總，同一天同一料號在同一站的數量會自動加總")
+
+    _report_file = st.file_uploader("選擇生產日報表 Excel", type=["xlsx", "xlsm"], key="report_uploader")
+
+    if _report_file and st.button("彙總報表", type="primary", key="report_gen_btn"):
+        try:
+            _report_wb = openpyxl.load_workbook(BytesIO(_report_file.read()), data_only=True)
+            _report_long = parse_daily_report_workbook(_report_wb)
+            if _report_long.empty:
+                st.warning("找不到可解析的資料，請確認檔案格式（工作表需有「日期」「料號」標題列）")
+            else:
+                _report_wide = aggregate_daily_report(_report_long)
+                st.session_state["report_wide"] = _report_wide
+                st.success(f"彙總完成，共 {len(_report_wide)} 筆（日期 × 料號）")
+        except Exception as _re:
+            import traceback as _rtb
+            st.error(f"彙總失敗：{_re}")
+            st.code(_rtb.format_exc())
+
+    if st.session_state.get("report_wide") is not None and not st.session_state["report_wide"].empty:
+        _report_wide = st.session_state["report_wide"]
+        st.dataframe(_report_wide, use_container_width=True, hide_index=True)
+
+        _report_buf = generate_report_excel(_report_wide)
+        _report_month = _report_wide["月"].iloc[0] if "月" in _report_wide.columns else ""
+        st.download_button(
+            "⬇️ 下載報表彙總.xlsx",
+            data=_report_buf,
+            file_name=f"報表彙總_{_report_month}月.xlsx" if _report_month != "" else "報表彙總.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
