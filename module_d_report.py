@@ -8,6 +8,7 @@ from io import BytesIO
 
 import openpyxl
 import pandas as pd
+from openpyxl.utils import get_column_letter
 
 _HEADER_ROW = 4
 _SUBHEADER_ROW = 5
@@ -36,18 +37,24 @@ def _station_map(ws) -> list[dict]:
     for i, (c, name) in enumerate(starts):
         end = starts[i + 1][0] - 1 if i + 1 < len(starts) else max_col
         ok_col = ng_col = None
+        reason_cols = []
         for cc in range(c, end + 1):
-            sub = _cell(ws, _SUBHEADER_ROW, cc)
+            sub = _cell(ws, _SUBHEADER_ROW, cc).split("\n")[0].strip()
             if sub == "OK":
                 ok_col = cc
             elif sub == "NG":
                 ng_col = cc
+            elif sub == "原因":
+                reason_cols.append(cc)
 
         # 同一份表若有重複站名（例如流程中出現兩次「外觀檢查」），加序號區分，避免彙總時誤合併
         seen[name] = seen.get(name, 0) + 1
         display_name = name if seen[name] == 1 else f"{name}{seen[name]}"
 
-        stations.append({"name": display_name, "start": c, "ok_col": ok_col, "ng_col": ng_col})
+        stations.append({
+            "name": display_name, "start": c,
+            "ok_col": ok_col, "ng_col": ng_col, "reason_cols": reason_cols,
+        })
     return stations
 
 
@@ -179,6 +186,11 @@ def build_summary_workbook(wb: openpyxl.Workbook, wide_df: pd.DataFrame,
                 ws.cell(row=row_idx, column=st_info["ok_col"], value=int(ok_val))
             if st_info["ng_col"] is not None and ng_val:
                 ws.cell(row=row_idx, column=st_info["ng_col"], value=int(ng_val))
+
+    # 總表不需要「原因」欄位，隱藏即可（保留欄位結構，其餘工作表不受影響）
+    reason_cols = sorted({c for st_info in stations for c in st_info["reason_cols"]})
+    for c in reason_cols:
+        ws.column_dimensions[get_column_letter(c)].hidden = True
 
     idx = wb.sheetnames.index(summary_sheet)
     if idx != 0:
