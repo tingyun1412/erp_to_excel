@@ -39,7 +39,7 @@ from sheets_db import (
 from module_d_report import (
     parse_daily_report_workbook,
     aggregate_daily_report,
-    generate_report_excel,
+    build_summary_workbook,
 )
 
 st.set_page_config(page_title="出貨自動化工具", page_icon="📦", layout="wide")
@@ -1317,13 +1317,16 @@ with tab_report:
 
     if _report_file and st.button("彙總報表", type="primary", key="report_gen_btn"):
         try:
-            _report_wb = openpyxl.load_workbook(BytesIO(_report_file.read()), data_only=True)
+            _report_bytes = _report_file.read()
+            _report_wb = openpyxl.load_workbook(BytesIO(_report_bytes), data_only=True)
             _report_long = parse_daily_report_workbook(_report_wb)
             if _report_long.empty:
                 st.warning("找不到可解析的資料，請確認檔案格式（工作表需有「日期」「料號」標題列）")
             else:
                 _report_wide = aggregate_daily_report(_report_long)
                 st.session_state["report_wide"] = _report_wide
+                st.session_state["report_source_bytes"] = _report_bytes
+                st.session_state["report_source_name"] = _report_file.name
                 st.success(f"彙總完成，共 {len(_report_wide)} 筆（日期 × 料號）")
         except Exception as _re:
             import traceback as _rtb
@@ -1334,12 +1337,18 @@ with tab_report:
         _report_wide = st.session_state["report_wide"]
         st.dataframe(_report_wide, use_container_width=True, hide_index=True)
 
-        _report_buf = generate_report_excel(_report_wide)
-        _report_month = _report_wide["月"].iloc[0] if "月" in _report_wide.columns else ""
-        st.download_button(
-            "⬇️ 下載報表彙總.xlsx",
-            data=_report_buf,
-            file_name=f"報表彙總_{_report_month}月.xlsx" if _report_month != "" else "報表彙總.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
+        try:
+            _report_wb_out = openpyxl.load_workbook(BytesIO(st.session_state["report_source_bytes"]))
+            _report_buf = build_summary_workbook(_report_wb_out, _report_wide)
+            _report_base = re.sub(r"\.xlsx?$", "", st.session_state.get("report_source_name", "報表彙總"), flags=re.IGNORECASE)
+            st.download_button(
+                "⬇️ 下載報表彙總.xlsx",
+                data=_report_buf,
+                file_name=f"{_report_base}_已彙總.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+        except Exception as _rwe:
+            import traceback as _rwtb
+            st.error(f"產出總表失敗：{_rwe}")
+            st.code(_rwtb.format_exc())

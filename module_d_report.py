@@ -137,9 +137,54 @@ def aggregate_daily_report(df: pd.DataFrame) -> pd.DataFrame:
     return wide
 
 
-def generate_report_excel(wide_df: pd.DataFrame) -> BytesIO:
+def build_summary_workbook(wb: openpyxl.Workbook, wide_df: pd.DataFrame,
+                            summary_sheet: str = "總表") -> BytesIO:
+    """
+    把彙總結果填入活頁簿中的「總表」工作表（沿用原本表頭格式與樣式），
+    並移到最前面；其餘工作表（各站原始資料）維持不動一併保留。
+    """
+    if summary_sheet in wb.sheetnames:
+        ws = wb[summary_sheet]
+    else:
+        template_ws = next(
+            (wb[n] for n in wb.sheetnames
+             if _cell(wb[n], _HEADER_ROW, _DATE_COL).split("\n")[0].strip() == "日期"),
+            None,
+        )
+        if template_ws is None:
+            raise ValueError("找不到可用的表頭範本，無法建立總表")
+        ws = wb.copy_worksheet(template_ws)
+        ws.title = summary_sheet
+
+    stations = _station_map(ws)
+
+    # 清除總表既有資料列（若原本已殘留資料）
+    if ws.max_row >= _DATA_START_ROW:
+        for row in ws.iter_rows(min_row=_DATA_START_ROW, max_row=ws.max_row):
+            for cell in row:
+                cell.value = None
+
+    for i, (_, r) in enumerate(wide_df.iterrows()):
+        row_idx = _DATA_START_ROW + i
+        ws.cell(row=row_idx, column=_DATE_COL, value=int(r["日"]))
+        ws.cell(row=row_idx, column=_ITEM_COL, value=r["料號"])
+        for st_info in stations:
+            ok_val = r.get(f"{st_info['name']}_OK", 0)
+            ng_val = r.get(f"{st_info['name']}_NG", 0)
+            if st_info["ok_col"] is None and st_info["ng_col"] is None:
+                if ok_val:
+                    ws.cell(row=row_idx, column=st_info["start"], value=int(ok_val))
+                continue
+            if st_info["ok_col"] is not None and ok_val:
+                ws.cell(row=row_idx, column=st_info["ok_col"], value=int(ok_val))
+            if st_info["ng_col"] is not None and ng_val:
+                ws.cell(row=row_idx, column=st_info["ng_col"], value=int(ng_val))
+
+    idx = wb.sheetnames.index(summary_sheet)
+    if idx != 0:
+        wb.move_sheet(summary_sheet, offset=-idx)
+
     output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        wide_df.to_excel(writer, index=False, sheet_name="報表彙總")
+    wb.save(output)
     output.seek(0)
     return output
