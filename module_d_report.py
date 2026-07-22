@@ -7,6 +7,7 @@
 而是逐表掃描第 4 列標題動態判斷，避免不同工作表欄位增減時解析錯位。
 """
 import re
+from copy import copy
 from io import BytesIO
 
 import openpyxl
@@ -102,14 +103,18 @@ def _num(ws, row, col) -> float:
         return 0.0
 
 
-def parse_daily_report_workbook(wb: openpyxl.Workbook) -> pd.DataFrame:
+def parse_daily_report_workbook(wb: openpyxl.Workbook, summary_sheet: str = "總表") -> pd.DataFrame:
     """
     解析生產日報表活頁簿，回傳長表：欄位為 月, 日, 工單號碼, 料號, 站, OK, NG, 工作表。
     自動略過沒有「日期／料號」標題列的工作表（例如空白總表），
     有無「工單號碼」欄位皆可解析（沒有時該欄為空字串）。
+    一律跳過「總表」本身：它是彙總後的結果，不是原始人員填寫的資料，
+    若被當成輸入來源會跟它彙總來源的原始工作表重複加總。
     """
     records = []
     for sheet_name in wb.sheetnames:
+        if sheet_name == summary_sheet:
+            continue
         ws = wb[sheet_name]
         if ws.max_row < _DATA_START_ROW:
             continue
@@ -218,8 +223,24 @@ def build_summary_workbook(wb: openpyxl.Workbook, wide_df: pd.DataFrame,
             for cell in row:
                 cell.value = None
 
+    # 範本通常只預先套好前面幾十列的格式（框線等），資料筆數超出範本列數時，
+    # 多出來的列直接用 ws.cell() 寫值不會帶格式。這裡固定拿第一筆資料列（_DATA_START_ROW）
+    # 當樣式範本，每一列都套用一次，確保超出範本原本列數的資料列也有一致格式。
+    _max_col = ws.max_column
+    _style_row = _DATA_START_ROW
+    _row_height = ws.row_dimensions[_style_row].height
+    _col_styles = {
+        c: copy(ws.cell(row=_style_row, column=c)._style)
+        for c in range(1, _max_col + 1)
+    }
+
     for i, (_, r) in enumerate(wide_df.iterrows()):
         row_idx = _DATA_START_ROW + i
+        if row_idx != _style_row:
+            for c in range(1, _max_col + 1):
+                ws.cell(row=row_idx, column=c)._style = copy(_col_styles[c])
+            if _row_height is not None:
+                ws.row_dimensions[row_idx].height = _row_height
         ws.cell(row=row_idx, column=layout["date_col"], value=int(r["日"]))
         if layout["workorder_col"] and r.get("工單號碼"):
             ws.cell(row=row_idx, column=layout["workorder_col"], value=r["工單號碼"])
@@ -236,10 +257,12 @@ def build_summary_workbook(wb: openpyxl.Workbook, wide_df: pd.DataFrame,
             if st_info["ng_col"] is not None and ng_val:
                 ws.cell(row=row_idx, column=st_info["ng_col"], value=int(ng_val))
 
-    # 總表不需要「原因」欄位，隱藏即可（保留欄位結構，其餘工作表不受影響）
+    # 「原因」欄位不能整欄隱藏——原因代碼對照表（1~8）就疊在這些欄位最上方幾列，
+    # 隱藏欄位會連對照表一起藏起來。總表複製自的範本可能已把這些欄位設為隱藏，
+    # 這裡強制取消隱藏（欄位內容本來就是空的，顯示出來無妨）。
     reason_cols = sorted({c for st_info in stations for c in st_info["reason_cols"]})
     for c in reason_cols:
-        ws.column_dimensions[get_column_letter(c)].hidden = True
+        ws.column_dimensions[get_column_letter(c)].hidden = False
 
     idx = wb.sheetnames.index(summary_sheet)
     if idx != 0:
