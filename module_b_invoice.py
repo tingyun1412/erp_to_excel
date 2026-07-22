@@ -1,12 +1,9 @@
 """
-模組 B：銷貨單 → 電子發票上傳 Excel（.xls）
+模組 B：月結（驗收資訊）→ 電子發票上傳 Excel（.xls）
 依照 e-invoice.com.tw V1.6 格式產生可直接上傳的 .xls 檔案。
 
-規則：
-- 銷貨單有發票號碼才匯入，沒有的直接跳過
-- 發票人（賣方）統編固定 24405403
-- 受票人（買方）統編從銷貨單的 buyer_tax_id 取
-- 單價、金額直接取自銷貨單解析結果
+單張銷貨單改用 einvoice_submitter.py 逐張送到 e-invoice.com.tw 網站開立
+（由網站配發發票號碼，不再自行配號），本模組只保留月結彙整這條路。
 """
 from datetime import datetime
 from io import BytesIO
@@ -51,115 +48,6 @@ def _now_time() -> str:
 def _col_width(chars: int) -> int:
     """xlwt 欄寬單位：1/256 個字元寬度"""
     return max(chars, 8) * 300
-
-
-def generate_invoice_excel(
-    orders: list[dict],
-    seller_tax_id: str = SELLER_TAX_ID,
-    invoice_prefix: str = "AA",   # 保留參數但已改用銷貨單發票號碼
-    start_number: int = 1,
-) -> BytesIO:
-    """
-    接收多張銷貨單，只處理有發票號碼的訂單，產生 .xls 格式上傳檔。
-    回傳 BytesIO（.xls bytes）。
-    """
-    wb = xlwt.Workbook(encoding="utf-8")
-    ws_main   = wb.add_sheet("發票主檔")
-    ws_detail = wb.add_sheet("發票明細")
-
-    # ── 主檔標題 ──────────────────────────────────────────────────
-    main_headers = [
-        "發票號碼(IVNO)", "發票日期(IVDAT)", "發票時間(IVTM)",
-        "未稅金額(IVAMT)", "稅率別(TAXRID)", "營業稅額(SALTAXAMT)",
-        "發票人統一編號(IVPESRFNO)", "受票人統一編號(TAIVPESRFNO)",
-        "款項別(CAID)", "相關號碼(RELNO)", "原幣金額(OCRYAMT)",
-        "匯率(EXR)", "幣別(CUCY)", "彙開(GROPMK)", "通關方式(CSTMMK)",
-        "買方聯絡人(BUYRCTM)", "買方聯絡人部門(BUYRCTMDP)",
-        "買受人電子郵件(CUEMAIL)", "總備註(COMT5)",
-        "發票開立自動通知(OPNAUTNTI)", "作廢發票自動通知(CANCELAUTNTI)",
-        "零稅率原因(ZEROTAXRATEREASON)",
-    ]
-    detail_headers = [
-        "發票號碼(IVNO)", "項次(IT)", "品名(DSR)", "品名2(DSR2)",
-        "數量(QTY1)", "單位(UN1)", "單價(UP)", "金額(AMT)",
-        "相關號碼一(RELNO1)", "相關號碼二(RELNO2)",
-    ]
-
-    for col, h in enumerate(main_headers):
-        ws_main.write(0, col, h, _HDR)
-        ws_main.col(col).width = _col_width(len(h))
-
-    for col, h in enumerate(detail_headers):
-        ws_detail.write(0, col, h, _HDR)
-        ws_detail.col(col).width = _col_width(len(h))
-
-    # ── 填入資料 ──────────────────────────────────────────────────
-    main_row   = 1   # xlwt 從 0 開始
-    detail_row = 1
-
-    for order in orders:
-        # 沒有發票號碼的銷貨單直接略過
-        inv_no = order.get("invoice_no", "").strip()
-        if not inv_no:
-            continue
-
-        items = order.get("items", [])
-        if not items:
-            continue
-
-        # 金額計算（未稅）
-        total_amount = sum(
-            item.get("quantity", 0) * item.get("unit_price", 0)
-            for item in items
-        )
-        tax_amount = round(total_amount * 0.05)
-
-        inv_date = _tw_date(order.get("order_date", ""))
-        inv_time = _now_time()
-        sid = seller_tax_id or SELLER_TAX_ID
-        bid = order.get("buyer_tax_id", "")
-        relno = order.get("order_no", "")
-
-        main_vals = [
-            inv_no, inv_date, inv_time,
-            total_amount, 1, tax_amount,
-            sid, bid,
-            "Z", relno, "", 1, "TWD",
-            "", "", "", "", "", "",
-            "", "", "",
-        ]
-        for col, val in enumerate(main_vals):
-            ws_main.write(main_row, col, val, _DAT)
-        main_row += 1
-
-        # 明細
-        for idx, item in enumerate(items, 1):
-            qty  = item.get("quantity", 1) or 1
-            unit = item.get("unit", "PC")
-            up   = item.get("unit_price", 0)
-            amt  = qty * up
-            # 品名 = 品名 + 規格 合一
-            name = item.get("name", "")
-            spec = item.get("description", "")
-            desc = (name + " " + spec).strip() or item.get("item_no", "")
-            desc2  = item.get("remark", "") or ""
-            relno1 = order.get("customer_order_no", "") or order.get("order_no", "")
-            relno2 = item.get("remark", "") or ""
-
-            det_vals = [
-                inv_no, idx, desc, desc2,
-                qty, unit, up, amt,
-                relno1, relno2,
-            ]
-            for col, val in enumerate(det_vals):
-                style = _DAT_L if col == 2 else _DAT
-                ws_detail.write(detail_row, col, val, style)
-            detail_row += 1
-
-    buf = BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    return buf
 
 
 # ── 月結驗收資訊 ─────────────────────────────────────────────────

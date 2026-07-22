@@ -25,8 +25,8 @@ VENDORS_HEADERS   = ["公司名稱", "網址", "帳號", "密碼"]
 
 SHEET_INVOICE_SKIP    = "發票跳過名單"
 INVOICE_SKIP_HEADERS  = ["客戶名稱", "原因"]
-SHEET_INVOICE_COUNTER = "發票號碼設定"
-INVOICE_COUNTER_HEADERS = ["字軌", "下一張號碼", "最後更新"]
+SHEET_EINVOICE_LOG    = "發票開立記錄"
+EINVOICE_LOG_HEADERS  = ["銷貨單號", "客戶名稱", "統一編號", "發票號碼", "狀態", "開立時間", "備註"]
 SHEET_SHIP_NOTES      = "出貨提醒"
 SHIP_NOTES_HEADERS    = ["客戶", "出貨要求", "備註"]
 
@@ -98,8 +98,8 @@ def get_sheet(sheet_name: str):
             ws.append_row(VENDORS_HEADERS)
         elif sheet_name == SHEET_INVOICE_SKIP:
             ws.append_row(INVOICE_SKIP_HEADERS)
-        elif sheet_name == SHEET_INVOICE_COUNTER:
-            ws.append_row(INVOICE_COUNTER_HEADERS)
+        elif sheet_name == SHEET_EINVOICE_LOG:
+            ws.append_row(EINVOICE_LOG_HEADERS)
         elif sheet_name == SHEET_SHIP_NOTES:
             ws.append_row(SHIP_NOTES_HEADERS)
         return ws
@@ -365,7 +365,7 @@ def clear_cache():
         pass
     try:
         load_invoice_skip_list.clear()
-        load_invoice_counter.clear()
+        load_einvoice_log.clear()
     except Exception:
         pass
     try:
@@ -434,25 +434,36 @@ def delete_invoice_skip(customer_name: str):
             return
 
 
-# ── 電子發票：號碼計數器 ────────────────────────────────────────────
+# ── 電子發票：逐張開立記錄（送出結果 + 防止重複送出）───────────────────
 
 @st.cache_data(ttl=120)
-def load_invoice_counter() -> dict:
-    """回傳 {"字軌": str, "下一張號碼": str, "最後更新": str}；尚未設定過回傳空 dict。"""
-    ws = get_sheet(SHEET_INVOICE_COUNTER)
-    records = _rows_to_records(_retry(ws.get_all_values), INVOICE_COUNTER_HEADERS)
-    return records[0] if records else {}
+def load_einvoice_log() -> list[dict]:
+    ws = get_sheet(SHEET_EINVOICE_LOG)
+    return _rows_to_records(_retry(ws.get_all_values), EINVOICE_LOG_HEADERS)
 
 
-def save_invoice_counter(track: str, next_number: int):
-    """儲存「下一張要用的發票號碼」。永遠只保留一列（目前唯一使用中的字軌）。"""
-    ws = get_sheet(SHEET_INVOICE_COUNTER)
-    records = _rows_to_records(_retry(ws.get_all_values), INVOICE_COUNTER_HEADERS)
+def save_einvoice_log(order_no: str, customer_name: str, tax_id: str,
+                       invoice_no: str, status: str, remark: str = ""):
+    """依銷貨單號 upsert。狀態："已開立"（成功，會擋掉重複送出）／"失敗"（可重試）。"""
+    ws = get_sheet(SHEET_EINVOICE_LOG)
+    records = _rows_to_records(_retry(ws.get_all_values), EINVOICE_LOG_HEADERS)
     now = datetime.now(_TW).strftime("%Y/%m/%d %H:%M")
-    if records:
-        _retry(lambda: ws.update("A2:C2", [[track, str(next_number), now]]))
-    else:
-        _retry(lambda: ws.append_row([track, str(next_number), now]))
+    row = [order_no, customer_name, tax_id, invoice_no or "", status, now, remark]
+    for i, r in enumerate(records):
+        if r.get("銷貨單號") == order_no:
+            _retry(lambda: ws.update(f"A{i+2}:G{i+2}", [row]))
+            return
+    _retry(lambda: ws.append_row(row))
+
+
+def delete_einvoice_log(order_no: str):
+    """管理用：清掉某張的開立記錄（例如網站上該發票已作廢），讓它能重新送出。"""
+    ws = get_sheet(SHEET_EINVOICE_LOG)
+    records = _rows_to_records(_retry(ws.get_all_values), EINVOICE_LOG_HEADERS)
+    for i, r in enumerate(records):
+        if r.get("銷貨單號") == order_no:
+            _retry(lambda: ws.delete_rows(i + 2))
+            return
 
 
 # ── 出貨提醒（依客戶顯示的出貨要求／備註）──────────────────────────────
