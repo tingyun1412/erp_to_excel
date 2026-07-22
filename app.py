@@ -240,8 +240,14 @@ with tab_label:
                         cname = o.get("customer_name", "")
                         note = _match_shipping_note(cname)
                         if note:
-                            _note_text = "　".join(x for x in [note.get("出貨要求", ""), note.get("備註", "")] if x)
-                            st.caption(f"{order_key}　{cname or '未知客戶'}　⚠️ {_note_text}")
+                            _req = note.get("出貨要求", "").strip()
+                            _remark = note.get("備註", "").strip()
+                            with st.container(border=True):
+                                st.markdown(f"**{order_key}**　{cname or '未知客戶'}")
+                                if _req:
+                                    st.caption(f"⚠️ 出貨要求：{_req}")
+                                if _remark:
+                                    st.caption(f"📝 備註：{_remark}")
                         else:
                             st.caption(f"{order_key}　{cname or '未知客戶'}")
 
