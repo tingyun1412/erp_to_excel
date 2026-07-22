@@ -27,6 +27,8 @@ SHEET_INVOICE_SKIP    = "發票跳過名單"
 INVOICE_SKIP_HEADERS  = ["客戶名稱", "原因"]
 SHEET_INVOICE_COUNTER = "發票號碼設定"
 INVOICE_COUNTER_HEADERS = ["字軌", "下一張號碼", "最後更新"]
+SHEET_SHIP_NOTES      = "出貨提醒"
+SHIP_NOTES_HEADERS    = ["客戶", "出貨要求", "備註"]
 
 _DRIVE_FOLDER     = "ERP標籤模板"
 _EXCEL_MIME       = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -98,6 +100,8 @@ def get_sheet(sheet_name: str):
             ws.append_row(INVOICE_SKIP_HEADERS)
         elif sheet_name == SHEET_INVOICE_COUNTER:
             ws.append_row(INVOICE_COUNTER_HEADERS)
+        elif sheet_name == SHEET_SHIP_NOTES:
+            ws.append_row(SHIP_NOTES_HEADERS)
         return ws
 
 
@@ -365,6 +369,10 @@ def clear_cache():
     except Exception:
         pass
     try:
+        load_shipping_notes.clear()
+    except Exception:
+        pass
+    try:
         download_template_excel.clear()
         download_lscr_base_template.clear()
         _drive_folder_id.clear()
@@ -445,3 +453,40 @@ def save_invoice_counter(track: str, next_number: int):
         _retry(lambda: ws.update("A2:C2", [[track, str(next_number), now]]))
     else:
         _retry(lambda: ws.append_row([track, str(next_number), now]))
+
+
+# ── 出貨提醒（依客戶顯示的出貨要求／備註）──────────────────────────────
+
+@st.cache_data(ttl=120)
+def load_shipping_notes() -> list[dict]:
+    ws = get_sheet(SHEET_SHIP_NOTES)
+    return _rows_to_records(_retry(ws.get_all_values), SHIP_NOTES_HEADERS)
+
+
+def save_shipping_note(customer: str, requirement: str, remark: str):
+    ws = get_sheet(SHEET_SHIP_NOTES)
+    records = _rows_to_records(_retry(ws.get_all_values), SHIP_NOTES_HEADERS)
+    for i, r in enumerate(records):
+        if r.get("客戶") == customer:
+            _retry(lambda: ws.update(f"A{i+2}:C{i+2}", [[customer, requirement, remark]]))
+            return
+    _retry(lambda: ws.append_row([customer, requirement, remark]))
+
+
+def delete_shipping_note(customer: str):
+    ws = get_sheet(SHEET_SHIP_NOTES)
+    records = _rows_to_records(_retry(ws.get_all_values), SHIP_NOTES_HEADERS)
+    for i, r in enumerate(records):
+        if r.get("客戶") == customer:
+            _retry(lambda: ws.delete_rows(i + 2))
+            return
+
+
+def replace_shipping_notes(rows: list[dict]):
+    """整批覆蓋出貨提醒清單（用於匯入每週更新的出貨要求 Excel）。"""
+    ws = get_sheet(SHEET_SHIP_NOTES)
+    _retry(ws.clear)
+    _retry(lambda: ws.append_row(SHIP_NOTES_HEADERS))
+    data = [[r.get("客戶", ""), r.get("出貨要求", ""), r.get("備註", "")] for r in rows if r.get("客戶")]
+    if data:
+        _retry(lambda: ws.append_rows(data))

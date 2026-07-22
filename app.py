@@ -35,6 +35,7 @@ from sheets_db import (
     find_lscr_base_template_id, save_lscr_base_template, download_lscr_base_template,
     load_invoice_skip_list, save_invoice_skip, delete_invoice_skip,
     load_invoice_counter, save_invoice_counter,
+    load_shipping_notes, replace_shipping_notes,
 )
 from module_d_report import (
     parse_daily_report_workbook,
@@ -160,8 +161,38 @@ with tab_label:
             if not all_templates:
                 st.warning("尚無任何標籤模板，請先到「管理模板」上傳")
             else:
-                def _match_template(customer_name: str):
-                    """廠商名稱比對：先完全包含，再找最長公共子字串 ≥ 3 字"""
+                # 標籤格式已統一，固定使用單一預設模板；若還留有多個模板才需手動指定
+                if len(all_templates) == 1:
+                    default_tmpl = all_templates[0]
+                else:
+                    st.caption("偵測到多個標籤模板，請選擇本次要使用的預設模板：")
+                    _tmpl_idx = st.selectbox(
+                        "預設模板",
+                        options=range(len(all_templates)),
+                        format_func=lambda i: _tmpl_label(all_templates[i]),
+                        label_visibility="collapsed",
+                    )
+                    default_tmpl = all_templates[_tmpl_idx]
+
+                # 選銷貨單
+                order_options = {
+                    o.get("order_no", o.get("filename", f"單{i}")): o
+                    for i, o in enumerate(all_orders)
+                }
+                selected_order_nos = st.multiselect(
+                    "選擇要產生標籤的銷貨單",
+                    options=list(order_options.keys()),
+                    default=list(order_options.keys()),
+                )
+                selected_orders = [order_options[k] for k in selected_order_nos]
+
+                # 出貨提醒：依客戶名稱比對（完全包含，或最長公共子字串 ≥ 3 字）
+                try:
+                    _ship_notes = load_shipping_notes()
+                except Exception:
+                    _ship_notes = []
+
+                def _match_shipping_note(customer_name: str):
                     if not customer_name:
                         return None
 
@@ -176,64 +207,30 @@ with tab_label:
                                     best = l
                         return best
 
-                    # 1. 優先：完全包含（原邏輯）
-                    for r in all_templates:
-                        vendor = r.get("廠商名稱", "")
-                        if vendor and (vendor in customer_name or customer_name in vendor):
+                    for r in _ship_notes:
+                        cust = r.get("客戶", "")
+                        if cust and (cust in customer_name or customer_name in cust):
                             return r
-
-                    # 2. 次要：最長公共子字串 ≥ 3 字
                     best_rec, best_len = None, 2
-                    for r in all_templates:
-                        vendor = r.get("廠商名稱", "")
-                        if vendor:
-                            ln = _lcs_len(customer_name, vendor)
+                    for r in _ship_notes:
+                        cust = r.get("客戶", "")
+                        if cust:
+                            ln = _lcs_len(customer_name, cust)
                             if ln > best_len:
                                 best_len, best_rec = ln, r
                     return best_rec
 
-                # 選銷貨單
-                order_options = {
-                    o.get("order_no", o.get("filename", f"單{i}")): o
-                    for i, o in enumerate(all_orders)
-                }
-                selected_order_nos = st.multiselect(
-                    "選擇要產生標籤的銷貨單",
-                    options=list(order_options.keys()),
-                    default=list(order_options.keys()),
-                )
-                selected_orders = [order_options[k] for k in selected_order_nos]
-
-                template_options = [
-                    _tmpl_label(r)
-                    for r in all_templates
-                ]
-
-                # 每張銷貨單獨立選擇模板（自動比對可手動覆蓋）
-                order_tmpl_map = {}
                 if selected_orders:
-                    st.markdown("**各銷貨單模板（自動比對，可手動覆蓋）：**")
+                    st.markdown("**銷貨單：**")
                     for o in selected_orders:
                         order_key = o.get("order_no", o.get("filename", ""))
                         cname = o.get("customer_name", "")
-                        auto_match = _match_template(cname)
-                        default_idx = next(
-                            (i for i, r in enumerate(all_templates) if r is auto_match), 0
-                        )
-                        _c1, _c2 = st.columns([5, 5])
-                        with _c1:
-                            _lbl = "✅ 自動" if auto_match else "⚠️ 未比對"
-                            st.caption(f"{_lbl}　{order_key}　{cname or '未知客戶'}")
-                        with _c2:
-                            _chosen = st.selectbox(
-                                "模板",
-                                options=range(len(template_options)),
-                                format_func=lambda i: template_options[i],
-                                index=default_idx,
-                                key=f"tmpl_sel_{order_key}",
-                                label_visibility="collapsed",
-                            )
-                        order_tmpl_map[order_key] = all_templates[_chosen]
+                        note = _match_shipping_note(cname)
+                        if note:
+                            _note_text = "　".join(x for x in [note.get("出貨要求", ""), note.get("備註", "")] if x)
+                            st.caption(f"{order_key}　{cname or '未知客戶'}　⚠️ {_note_text}")
+                        else:
+                            st.caption(f"{order_key}　{cname or '未知客戶'}")
 
                 # 顯示選取的品項
                 selected_items = [
@@ -310,19 +307,17 @@ with tab_label:
                     st.warning("請選擇至少一張銷貨單")
 
                 # 警告：模板無動態欄位 → 標籤只有固定文字
-                if selected_orders and order_tmpl_map:
-                    for _rec in order_tmpl_map.values():
-                        _info = template_from_json(_rec["設定JSON"])
-                        _dyn = [c for c in _info.get("cells", []) if c.get("field") != "__fixed__"]
-                        if not _dyn:
-                            st.error(
-                                f"⚠️ 模板「{_tmpl_label(_rec)}」沒有動態欄位，"
-                                "標籤將只顯示固定文字（無料號、品名等）。"
-                                "請到「管理模板」重新上傳並分析此模板。"
-                            )
-                            break
+                if selected_orders and default_tmpl:
+                    _info = template_from_json(default_tmpl["設定JSON"])
+                    _dyn = [c for c in _info.get("cells", []) if c.get("field") != "__fixed__"]
+                    if not _dyn:
+                        st.error(
+                            f"⚠️ 模板「{_tmpl_label(default_tmpl)}」沒有動態欄位，"
+                            "標籤將只顯示固定文字（無料號、品名等）。"
+                            "請到「管理模板」重新上傳並分析此模板。"
+                        )
 
-                if selected_orders and order_tmpl_map and st.button("產出標籤 Excel", type="primary", use_container_width=True):
+                if selected_orders and default_tmpl and st.button("產出標籤 Excel", type="primary", use_container_width=True):
                     with st.spinner("產出中..."):
                         try:
                             # 套用分裝：展開品項
@@ -373,8 +368,7 @@ with tab_label:
 
                             pairs = []
                             for o in _gen_orders:
-                                order_key = o.get("order_no", o.get("filename", ""))
-                                rec = order_tmpl_map.get(order_key, all_templates[0])
+                                rec = default_tmpl
                                 tmpl_key = f"{rec['廠商名稱']}_{rec['模板名稱']}"
                                 wb_bytes = st.session_state.template_wb_bytes.get(tmpl_key)
                                 twb = (
@@ -403,15 +397,11 @@ with tab_label:
                             st.code(traceback.format_exc())
 
                 # 若模板 Excel 尚未上傳，提供重新上傳入口
-                if selected_orders and order_tmpl_map:
-                    _shown_keys = set()
-                    for _ok, _rec in order_tmpl_map.items():
-                        _tk = f"{_rec['廠商名稱']}_{_rec['模板名稱']}"
-                        if _tk in _shown_keys or _tk in st.session_state.template_wb_bytes:
-                            continue
-                        _shown_keys.add(_tk)
+                if selected_orders and default_tmpl:
+                    _tk = f"{default_tmpl['廠商名稱']}_{default_tmpl['模板名稱']}"
+                    if _tk not in st.session_state.template_wb_bytes:
                         _re = st.file_uploader(
-                            f"上傳「{_tmpl_label(_rec)}」原始 Excel（保留樣式用）",
+                            f"上傳「{_tmpl_label(default_tmpl)}」原始 Excel（保留樣式用）",
                             type=["xlsx", "xls"],
                             key=f"reupload_{_tk}",
                         )
@@ -694,6 +684,68 @@ with tab_label:
                                 st.error("分析失敗，此工作表無內容")
         except Exception as e:
             st.error(f"載入失敗：{e}")
+
+        st.divider()
+        st.markdown("### 出貨提醒設定")
+        st.caption(
+            "依客戶名稱比對，銷貨單解析後會在「產出標籤」顯示對應的出貨要求／備註。"
+            "可直接匯入每週更新的出貨要求 Excel（需含「出貨要求」工作表，欄位：客戶／出貨要求／備註），"
+            "或在下方表格直接編輯。"
+        )
+
+        _ship_import = st.file_uploader("匯入出貨要求 Excel", type=["xlsx", "xls"], key="ship_notes_import")
+        if _ship_import and st.button("匯入並覆蓋目前清單", key="ship_notes_import_btn"):
+            try:
+                _swb = openpyxl.load_workbook(BytesIO(_ship_import.read()), data_only=True)
+                if "出貨要求" not in _swb.sheetnames:
+                    st.error("找不到「出貨要求」工作表")
+                else:
+                    _sws = _swb["出貨要求"]
+                    _ship_rows = []
+                    for r in range(2, _sws.max_row + 1):
+                        cust = _sws.cell(row=r, column=1).value
+                        if not cust:
+                            continue
+                        _ship_rows.append({
+                            "客戶": str(cust).strip(),
+                            "出貨要求": str(_sws.cell(row=r, column=2).value or "").strip(),
+                            "備註": str(_sws.cell(row=r, column=3).value or "").strip(),
+                        })
+                    replace_shipping_notes(_ship_rows)
+                    clear_cache()
+                    st.success(f"已匯入 {len(_ship_rows)} 筆出貨提醒")
+                    st.rerun()
+            except Exception as _se:
+                st.error(f"匯入失敗：{_se}")
+
+        try:
+            _ship_notes_cur = load_shipping_notes()
+        except Exception as _se2:
+            st.error(f"載入出貨提醒失敗：{_se2}")
+            _ship_notes_cur = []
+
+        _ship_df = pd.DataFrame(_ship_notes_cur or [{"客戶": "", "出貨要求": "", "備註": ""}])
+        _ship_edited = st.data_editor(
+            _ship_df,
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            key="ship_notes_editor",
+        )
+        if st.button("儲存出貨提醒", key="ship_notes_save_btn"):
+            _ship_rows2 = [
+                {
+                    "客戶": str(r.get("客戶", "")).strip(),
+                    "出貨要求": str(r.get("出貨要求", "")).strip(),
+                    "備註": str(r.get("備註", "")).strip(),
+                }
+                for r in _ship_edited.to_dict("records")
+                if str(r.get("客戶", "")).strip()
+            ]
+            replace_shipping_notes(_ship_rows2)
+            clear_cache()
+            st.success("已儲存")
+            st.rerun()
 
     # ── 從廠商網站下載標籤 ───────────────────────────────────────
     with sub_tab_erp:
