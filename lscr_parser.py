@@ -43,8 +43,11 @@ def parse_lscr_excel_wb(wb: openpyxl.Workbook) -> list[dict]:
     # 欄位：C1=ID1, C2=ID2,
     #       C5=PO NO, C6=LOT NO, C7=Item(料號), C8=成品圖號,
     #       C9=品名, C10=規格,
-    #       C11=總數量, C12=大包裝qty, C13=大包裝unit,
-    #       C14=小包裝qty, C15=小包裝unit
+    #       C11=總數量
+    # C12~C15 有兩種版本的確認單格式，逐行判斷用哪一種（見下方）：
+    #   舊版：C12=大包裝qty, C13=大包裝unit, C14=小包裝qty, C15=小包裝unit
+    #   新版（C14 沒有值時）：C12=標籤(小包裝)qty, C13=標籤(小包裝)unit，
+    #                        大包裝固定＝該行自己的訂單總數量（C11）
     orders_map: dict[str, dict] = {}
 
     for r in range(6, ws.max_row + 1):
@@ -62,10 +65,24 @@ def parse_lscr_excel_wb(wb: openpyxl.Workbook) -> list[dict]:
         remark = _v(ws, r, 8)   # 成品圖號
         name = _v(ws, r, 9)
         desc = _v(ws, r, 10)
-        large_qty = _v(ws, r, 12)
-        large_unit = _v(ws, r, 13) or "PCS"
-        small_qty = _v(ws, r, 14)
-        small_unit = _v(ws, r, 15) or "PCS"
+        col12 = _v(ws, r, 12)
+        col13 = _v(ws, r, 13)
+        col14 = _v(ws, r, 14)
+        col15 = _v(ws, r, 15)
+
+        if col14:
+            # 舊版格式：C14 有值，照舊當小包裝欄位
+            large_qty = col12
+            large_unit = col13 or "PCS"
+            small_qty = col14
+            small_unit = col15 or "PCS"
+        else:
+            # 新版格式：沒有獨立的大包裝欄位，C12/C13 是小包裝（固定兩張），
+            # 大標籤直接印這一行自己的訂單總數量
+            large_qty = total_col
+            large_unit = "PCS"
+            small_qty = col12
+            small_unit = col13 or "PCS"
 
         # 品名加入 ID1/ID2 尺寸
         if id1 and id2:
