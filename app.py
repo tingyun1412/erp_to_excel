@@ -281,14 +281,20 @@ with tab_label:
                         if not _items:
                             continue
                         _note = _match_shipping_note(order.get("customer_name", ""))
-                        _header = f"**{order.get('order_no','')}** — {order.get('customer_name','')}"
+                        st.markdown(f"**{order.get('order_no','')}** — {order.get('customer_name','')}")
                         if _note:
                             _req = _note.get("出貨要求", "").strip()
                             _remark = _note.get("備註", "").strip()
-                            _note_text = "　".join(x for x in [_req, _remark] if x)
-                            if _note_text:
-                                _header += f"　⚠️ {_note_text}"
-                        st.markdown(_header)
+                            if _req or _remark:
+                                st.dataframe(
+                                    [{"出貨要求": _req, "備註": _remark}],
+                                    use_container_width=True,
+                                    hide_index=True,
+                                    column_config={
+                                        "出貨要求": st.column_config.TextColumn(width="large"),
+                                        "備註":     st.column_config.TextColumn(width="large"),
+                                    },
+                                )
                         st.dataframe(
                             [{
                                 "料號":     it.get("item_no", ""),
