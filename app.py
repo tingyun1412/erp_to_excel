@@ -286,15 +286,9 @@ with tab_label:
                             _req = _note.get("出貨要求", "").strip()
                             _remark = _note.get("備註", "").strip()
                             if _req or _remark:
-                                st.dataframe(
-                                    [{"出貨要求": _req, "備註": _remark}],
-                                    use_container_width=True,
-                                    hide_index=True,
-                                    column_config={
-                                        "出貨要求": st.column_config.TextColumn(width="large"),
-                                        "備註":     st.column_config.TextColumn(width="large"),
-                                    },
-                                )
+                                # st.dataframe 長文字會被裁切看不到，這裡只有一列資料，
+                                # 改用 st.table──它會整格顯示完整內容、自動換行，不會裁切。
+                                st.table(pd.DataFrame([{"出貨要求": _req, "備註": _remark}]).set_index(pd.Index([""])))
                         st.dataframe(
                             [{
                                 "料號":     it.get("item_no", ""),

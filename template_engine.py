@@ -16,6 +16,15 @@ from io import BytesIO
 import openpyxl
 from openpyxl.utils import get_column_letter
 
+# 全公司統一用同一台標籤印表機（TSC TTP-246M Plus，106×40mm 標籤紙）的固定尺寸，
+# 一般標籤模板（_write_order_to_sheet）跟 LSCR 專用排版（write_lscr_labels）都用
+# 這組常數，不相信範本自己分析出來的欄寬/列高，避免不同範本分析誤差造成印出來
+# 的標籤大小跑掉。
+_LABEL_COL_WIDTH = 25
+_LABEL_GAP_WIDTH = 2.45
+_LABEL_FIRST_ROW_HEIGHT = 14.8
+_LABEL_OTHER_ROW_HEIGHT = 14.0
+
 
 # ── 欄位對應表 ────────────────────────────────────────────────────
 DYNAMIC_FIELDS = {
@@ -34,10 +43,6 @@ DYNAMIC_FIELDS = {
 }
 
 FIELD_LABELS = list(DYNAMIC_FIELDS.keys())
-
-# 廠商使用跟 LSCR 一樣的標籤印表機（TSC TTP-246M Plus），輸出行高/頁面設定需強制對齊，
-# 不採用上傳範本 Excel 裡原本的行高（避免印出來跟 LSCR 尺寸對不齊）。
-_LSCR_PRINTER_VENDORS = {"晶晟"}
 
 
 def _fmt_date(d: str) -> str:
@@ -470,9 +475,10 @@ def _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info: dict, orders: li
     """
     Passthrough 模式：直接複製 template 的格子（保留格式），再覆寫動態欄位。
     logo_imgs: 若呼叫者已提取（避免重複讀 BytesIO），直接傳入；否則內部自行提取。
-    vendor: 廠商名稱；若屬於 _LSCR_PRINTER_VENDORS，行高/列間距/頁面設定強制對齊 LSCR 輸出。
+    全公司統一用同一台標籤印表機（TSC TTP-246M Plus），行高/欄寬/頁面設定一律強制
+    對齊 LSCR 輸出規格，不採用上傳範本 Excel 裡原本的尺寸（避免印出來跟標準尺寸跑掉）。
     """
-    use_lscr_layout       = vendor in _LSCR_PRINTER_VENDORS
+    use_lscr_layout       = True
     unit_rows            = template_info["unit_rows"]
     columns_per_unit     = template_info["columns_per_unit"]
     units_per_row        = template_info.get("units_per_row", 1)
@@ -630,19 +636,21 @@ def _write_order_to_sheet(
     gap_cols         = template_info.get("gap_cols", 1)
     units_per_row    = template_info.get("units_per_row", 2)
     cells_info       = template_info["cells"]
-    col_widths       = template_info.get("col_widths", {})
-    row_heights      = template_info.get("row_heights", {})
 
     header_cells = [c for c in cells_info if c.get("is_header")]
     data_cells   = [c for c in cells_info if not c.get("is_header")]
 
-    # 設定欄寬（第 1 欄固定 24.5）
+    # 欄寬/列高固定用跟 LSCR（write_lscr_labels）相同的印表機規格（TSC TTP-246M Plus），
+    # 不相信範本自己分析出來的欄寬/列高——不同範本分析時難免有誤差，全公司統一用同一台
+    # 印表機的固定尺寸，才能保證每次印出來的標籤大小一致、不會跑版。
     for unit_idx in range(units_per_row):
         base = unit_idx * (columns_per_unit + gap_cols)
-        for rel_col_str, width in col_widths.items():
-            abs_col = base + int(rel_col_str)
-            col_w = 24.5 if int(rel_col_str) == 1 else width
-            ws_out.column_dimensions[get_column_letter(abs_col)].width = col_w
+        for rel_col in range(1, columns_per_unit + 1):
+            ws_out.column_dimensions[get_column_letter(base + rel_col)].width = _LABEL_COL_WIDTH
+        for gap_offset in range(1, gap_cols + 1):
+            ws_out.column_dimensions[
+                get_column_letter(base + columns_per_unit + gap_offset)
+            ].width = _LABEL_GAP_WIDTH
 
     all_items = [(item, order) for order in orders for item in order.get("items", [])]
     current_row = 1
@@ -659,8 +667,7 @@ def _write_order_to_sheet(
                 for hc in header_cells:
                     cell = ws_out.cell(row=current_row, column=hc["col"], value=hc["value"])
                     _copy_style(ws_tmpl, 1, hc["col"], cell)
-                if "1" in row_heights:
-                    ws_out.row_dimensions[current_row].height = row_heights["1"]
+                ws_out.row_dimensions[current_row].height = _LABEL_FIRST_ROW_HEIGHT
                 current_row += 1
 
             for row_offset in range(qty):
@@ -673,16 +680,18 @@ def _write_order_to_sheet(
                     val = _fill_value(dc, item, order, seq)
                     cell = ws_out.cell(row=data_row, column=col, value=val)
                     _copy_style(ws_tmpl, 2, col, cell)
-                ws_out.row_dimensions[data_row].height = row_heights.get("2", 20)
+                ws_out.row_dimensions[data_row].height = _LABEL_OTHER_ROW_HEIGHT
 
             current_row += qty + 1
 
         else:
             rows_needed = (qty + units_per_row - 1) // units_per_row
             for label_row in range(rows_needed):
-                for rel_row_str, height in row_heights.items():
-                    abs_row = current_row + int(rel_row_str) - 1
-                    ws_out.row_dimensions[abs_row].height = height
+                for rel_row in range(1, unit_rows + 1):
+                    abs_row = current_row + rel_row - 1
+                    ws_out.row_dimensions[abs_row].height = (
+                        _LABEL_FIRST_ROW_HEIGHT if rel_row == 1 else _LABEL_OTHER_ROW_HEIGHT
+                    )
 
                 # 每個 label block 放置 logo
                 if logo_imgs:
@@ -887,13 +896,12 @@ def _inject_drawings_zip_level(
         out_ws_name    = out_sheetnames[pair_idx] if pair_idx < len(out_sheetnames) else ""
 
         order_p             = pair.get("order", {})
-        vendor_p             = pair.get("vendor", "")
         unit_rows_p          = tinfo.get("unit_rows", 1)
         units_per_row_p      = tinfo.get("units_per_row", 1) or 1
         gap_cols_p           = tinfo.get("gap_cols", 1)
         columns_per_unit_p   = tinfo.get("columns_per_unit", 1)
         first_unit_col0_p    = tinfo.get("first_unit_start_col", 1) - 1  # 0-based, matches drawing XML <xdr:col>
-        use_lscr_layout_p    = vendor_p in _LSCR_PRINTER_VENDORS
+        use_lscr_layout_p    = True
 
         # find output sheet list index
         if out_ws_name in out_sheet_names_order:
@@ -1617,13 +1625,13 @@ def write_lscr_labels(
     ws_out = wb_out.active
     ws_out.title = "Labels"
 
-    # 固定欄寬（符合 TSC TTP-246M Plus 標籤機設定）
+    # 固定欄寬（符合 TSC TTP-246M Plus 標籤機設定，見模組頂部 _LABEL_* 常數）
     # A=小標1, B=間距, C=小標2, D=間距, E=大標
-    ws_out.column_dimensions["A"].width = 25
-    ws_out.column_dimensions["B"].width = 4
-    ws_out.column_dimensions["C"].width = 25
-    ws_out.column_dimensions["D"].width = 2.45
-    ws_out.column_dimensions["E"].width = 25
+    ws_out.column_dimensions["A"].width = _LABEL_COL_WIDTH
+    ws_out.column_dimensions["B"].width = 4  # 小標1/小標2 之間的間距，跟 D 欄不同寬
+    ws_out.column_dimensions["C"].width = _LABEL_COL_WIDTH
+    ws_out.column_dimensions["D"].width = _LABEL_GAP_WIDTH
+    ws_out.column_dimensions["E"].width = _LABEL_COL_WIDTH
 
     unit_merges = [
         m for m in ws_tmpl.merged_cells.ranges
@@ -1677,9 +1685,9 @@ def write_lscr_labels(
 
             # 固定列高（TSC TTP-246M Plus 設定）
             # 8列總高 14.8+7×14.0=112.8pt=39.8mm，留 0.2mm 緩衝不超出 40mm 標籤
-            ws_out.row_dimensions[current_row].height = 14.8
+            ws_out.row_dimensions[current_row].height = _LABEL_FIRST_ROW_HEIGHT
             for r_off in range(1, unit_rows):
-                ws_out.row_dimensions[current_row + r_off].height = 14.0
+                ws_out.row_dimensions[current_row + r_off].height = _LABEL_OTHER_ROW_HEIGHT
 
             if one_box:
                 if include_small or include_large:
