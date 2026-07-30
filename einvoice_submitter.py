@@ -25,6 +25,10 @@ ISSUE_BUTTON_SELECTOR  = 'input[type="button"][value="開立發票"]'
 CANCEL_BUTTON_SELECTOR = 'input[type="button"][value="放棄開立"]'
 ADD_ITEM_SELECTOR      = "#idAddButton"
 
+# e-invoice.com.tw 帳密（跟公司內部系統帳密不同層級，直接寫死不用另外設定）
+LOGIN_ACCOUNT  = "24405403I1"
+LOGIN_PASSWORD = "Gc24405403"
+
 # 核心會員只有日月光，其餘一律走一般會員流程
 CORE_MEMBER_CUSTOMERS = ["日月光"]
 
@@ -65,7 +69,8 @@ def resolve_member_type(customer_name: str) -> str:
 
 def launch_login_browser() -> dict:
     """
-    開一個有畫面的 Chromium，導到登入頁，讓使用者手動輸入帳密與圖形驗證碼。
+    開一個有畫面的 Chromium，導到登入頁，並自動把帳號密碼填好——
+    只剩圖形驗證碼要人工輸入，輸完按登入即可。
     user-data-dir 用固定目錄（不是臨時目錄），下次開啟有機會還保留登入 session，
     減少要重新過驗證碼的次數。
     回傳 {"port": int, "pid": int}。
@@ -90,6 +95,23 @@ def launch_login_browser() -> dict:
         ],
         creationflags=subprocess.DETACHED_PROCESS if sys.platform == "win32" else 0,
     )
+
+    # 等瀏覽器真的開起來、把帳密先填好，讓使用者只需要輸入圖形驗證碼。
+    # 如果已經是登入後的狀態（沿用了舊 session），畫面上不會有密碼欄位，填不到也沒關係。
+    import time
+    for _ in range(20):
+        try:
+            with sync_playwright() as pw:
+                browser = pw.chromium.connect_over_cdp(f"http://localhost:{port}", timeout=2_000)
+                ctx = browser.contexts[0]
+                page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                if page.locator("#inputAcno").count() > 0:
+                    page.fill("#inputAcno", LOGIN_ACCOUNT)
+                    page.fill("#inputPswd", LOGIN_PASSWORD)
+            break
+        except Exception:
+            time.sleep(0.5)
+
     return {"port": port, "pid": proc.pid}
 
 

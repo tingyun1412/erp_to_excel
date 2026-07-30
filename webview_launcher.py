@@ -62,7 +62,7 @@ def main():
     creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     proc = subprocess.Popen(
         [sys.executable, "-m", "streamlit", "run", str(HERE / "app.py"),
-         "--server.port", str(port)],
+         "--server.port", str(port), "--server.headless", "true"],
         cwd=str(HERE),
         env=env,
         stdout=log_fh,

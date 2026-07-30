@@ -1307,14 +1307,7 @@ with tab_invoice:
 
                 st.divider()
                 st.markdown("### 登入 e-invoice.com.tw")
-
-                _vendors = load_vendors()
-                _einv_vendor = next((v for v in _vendors if v.get("公司名稱") == "e-invoice.com.tw"), None)
-                if not _einv_vendor:
-                    st.info(
-                        "尚未設定 e-invoice.com.tw 帳密，請至「標籤 > 從廠商網站下載標籤」的廠商帳號管理"
-                        "新增一筆「公司名稱」為 e-invoice.com.tw 的帳號密碼"
-                    )
+                st.caption("帳密已自動帶入，只需要在跳出的視窗輸入圖形驗證碼後按登入")
 
                 _lc1, _lc2, _lc3 = st.columns(3)
                 with _lc1:
