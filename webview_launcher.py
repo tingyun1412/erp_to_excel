@@ -75,6 +75,7 @@ def main():
             raise RuntimeError(f"Streamlit 伺服器啟動逾時，請查看 {LOG_FILE}")
 
         import webview
+        webview.settings["ALLOW_DOWNLOADS"] = True  # 預設是關的，不開的話按下載按鈕完全沒反應
         webview.create_window("出貨自動化工具", f"http://127.0.0.1:{port}", width=1440, height=960)
         webview.start()
     finally:
