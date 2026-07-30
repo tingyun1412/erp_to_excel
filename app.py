@@ -26,15 +26,16 @@ from template_engine import (
     get_field_options, FIELD_LABELS, DYNAMIC_FIELDS,
     write_lscr_labels,
 )
-from sheets_db import (
+from local_template_store import (
     load_templates, save_template, delete_template,
-    clear_cache,
-    load_vendors, save_vendor, delete_vendor,
     download_template_excel,
     find_lscr_base_template_id, save_lscr_base_template, download_lscr_base_template,
+)
+from local_db import (
+    load_vendors, save_vendor, delete_vendor,
     load_invoice_skip_list, save_invoice_skip, delete_invoice_skip,
-    load_einvoice_log, save_einvoice_log, delete_einvoice_log,
-    load_shipping_notes, replace_shipping_notes,
+    load_einvoice_log, save_einvoice_log, delete_einvoice_log, try_claim_order,
+    load_shipping_notes, SHIPPING_NOTES_PATH,
 )
 from module_d_report import (
     parse_daily_report_workbook,
@@ -50,6 +51,24 @@ def _tmpl_label(r: dict) -> str:
     """模板顯示名稱：廠商=模板名稱時只顯示一個，否則顯示『廠商 — 模板』"""
     v, t = r.get("廠商名稱", ""), r.get("模板名稱", "")
     return v if v == t else f"{v} — {t}"
+
+
+_OLE2_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+
+def _read_uploaded_workbook(file_bytes: bytes, **kwargs):
+    """
+    包住 openpyxl.load_workbook，遇到舊版 .xls（OLE2 格式，不是 zip）時
+    丟出清楚的中文錯誤訊息，而不是讓 BadZipFile 的原始 traceback 整個炸出來。
+    舊版 .xls 沒辦法無損轉成 .xlsx（樣式/框線會跟著跑掉），所以這裡不自動轉檔，
+    只提示使用者自己用 Excel 另存新檔成 .xlsx 再重新上傳。
+    """
+    if file_bytes[:8] == _OLE2_SIGNATURE:
+        raise ValueError(
+            "這個檔案是舊版 .xls 格式（Excel 97-2003），無法直接讀取。"
+            "請用 Excel 開啟後「另存新檔」成 .xlsx 格式，再重新上傳。"
+        )
+    return openpyxl.load_workbook(BytesIO(file_bytes), **kwargs)
 
 if "parsed_orders" not in st.session_state:
     st.session_state.parsed_orders = []
@@ -130,9 +149,9 @@ tab_label, tab_invoice, tab_report = st.tabs([
 with tab_label:
     st.subheader("出貨標籤")
 
-    # 頁面一開啟就從 Google Drive 補載所有有 ID 的模板 Excel（不需等有訂單才跑）
-    _preload_missing = []   # 雲端根本沒有 Excel檔案ID（之前上傳時就沒同步成功）
-    _preload_failed  = []   # 有 Excel檔案ID 但這次下載失敗（網路/權限問題）
+    # 頁面一開啟就從本機補載所有有檔名的模板 Excel（不需等有訂單才跑）
+    _preload_missing = []   # 本機根本沒有 Excel檔案ID（之前上傳時就沒存成功）
+    _preload_failed  = []   # 有 Excel檔案ID 但這次讀檔失敗（檔案被搬走/刪除）
     try:
         _all_tpls_preload = load_templates()
         for _tr in _all_tpls_preload:
@@ -152,9 +171,9 @@ with tab_label:
     if _preload_missing or _preload_failed:
         with st.expander(f"⚠️ {len(_preload_missing) + len(_preload_failed)} 個模板需要重新上傳原始 Excel", expanded=False):
             if _preload_missing:
-                st.caption("尚未同步到雲端（請到「管理模板」重新分析補傳一次即可永久解決）：" + "、".join(_preload_missing))
+                st.caption("尚未存到本機（請到「管理模板」重新分析補傳一次即可永久解決）：" + "、".join(_preload_missing))
             if _preload_failed:
-                st.caption("雲端下載失敗（可能是暫時性網路問題，重新整理再試一次）：" + "、".join(_preload_failed))
+                st.caption("本機檔案讀取失敗（檔案可能被搬走或刪除）：" + "、".join(_preload_failed))
 
     sub_tab_use, sub_tab_manage, sub_tab_erp, sub_tab_lscr = st.tabs(["產出標籤", "管理模板", "從廠商網站下載標籤", "LSCR 確認單"])
 
@@ -425,8 +444,14 @@ with tab_label:
                             key=f"reupload_{_tk}",
                         )
                         if _re:
-                            st.session_state.template_wb_bytes[_tk] = _re.read()
-                            st.rerun()
+                            _re_raw = _re.read()
+                            try:
+                                _read_uploaded_workbook(_re_raw)  # 只是驗證格式，丟例外就不存進去
+                            except ValueError as _ve:
+                                st.error(str(_ve))
+                            else:
+                                st.session_state.template_wb_bytes[_tk] = _re_raw
+                                st.rerun()
 
     # ── 管理模板 ──────────────────────────────────────────────
     with sub_tab_manage:
@@ -447,7 +472,13 @@ with tab_label:
 
         if uploaded_tmpl:
             tmpl_bytes = uploaded_tmpl.read()
-            wb = openpyxl.load_workbook(BytesIO(tmpl_bytes))
+            try:
+                wb = _read_uploaded_workbook(tmpl_bytes)
+            except ValueError as _ve:
+                wb = None
+                st.error(str(_ve))
+
+        if uploaded_tmpl and wb is not None:
             sheet_names = wb.sheetnames
 
             batch_mode = st.checkbox(
@@ -478,11 +509,10 @@ with tab_label:
                                 saved += 1
                             except Exception:
                                 skipped += 1
-                        clear_cache()
                         st.success(f"完成！成功建立 {saved} 個模板" + (f"，{skipped} 個失敗" if skipped else ""))
                         if sync_errors:
                             st.warning(
-                                "⚠️ 以下模板的原始 Excel 未能同步到雲端（僅存在目前分頁的暫存中）："
+                                "⚠️ 以下模板的原始 Excel 未能存到本機（僅存在目前分頁的暫存中）："
                                 + "、".join(sync_errors)
                                 + "。下次重新整理或換裝置時會需要重新上傳。"
                                 f"\n\n錯誤訊息：{first_sync_err}"
@@ -624,11 +654,10 @@ with tab_label:
                     del st.session_state["_pending_customer"]
                     del st.session_state["_pending_tmpl_name"]
                     st.session_state.pop("_pending_is_edit", None)
-                    clear_cache()
                     st.success(f"模板「{customer} — {tmpl_name}」已儲存！")
                     if _sync_err:
                         st.warning(
-                            f"⚠️ 原始 Excel 未能同步到雲端，重新整理頁面或換裝置後會需要重新上傳。\n\n"
+                            f"⚠️ 原始 Excel 未能存到本機，重新整理頁面或換裝置後會需要重新上傳。\n\n"
                             f"錯誤訊息：{_sync_err}"
                         )
                     else:
@@ -668,7 +697,6 @@ with tab_label:
                             if st.button("🗑 刪除此模板", key=f"del_{r['廠商名稱']}_{r['模板名稱']}"):
                                 try:
                                     delete_template(r["廠商名稱"], r["模板名稱"])
-                                    clear_cache()
                                     st.success("已刪除")
                                     st.rerun()
                                 except Exception as e:
@@ -682,7 +710,12 @@ with tab_label:
                         )
                         if _re_file:
                             _re_bytes = _re_file.read()
-                            _re_wb = openpyxl.load_workbook(BytesIO(_re_bytes))
+                            try:
+                                _re_wb = _read_uploaded_workbook(_re_bytes)
+                            except ValueError as _ve:
+                                _re_wb = None
+                                st.error(str(_ve))
+                        if _re_file and _re_wb is not None:
                             _re_sname = info.get("sheet_name", _re_wb.sheetnames[0])
                             if _re_sname not in _re_wb.sheetnames:
                                 _re_sname = _re_wb.sheetnames[0]
@@ -690,11 +723,10 @@ with tab_label:
                             if _re_info and _re_info.get("cells"):
                                 _re_err = save_template(r["廠商名稱"], r["模板名稱"], template_to_json(_re_info), excel_bytes=_re_bytes)
                                 st.session_state.template_wb_bytes[_tmpl_key] = _re_bytes
-                                clear_cache()
                                 st.success(f"重新分析完成，找到 {len([c for c in _re_info['cells'] if c['field']!='__fixed__'])} 個動態欄位")
                                 if _re_err:
                                     st.warning(
-                                        f"⚠️ 原始 Excel 未能同步到雲端，下次重新整理可能又要重傳一次。\n\n"
+                                        f"⚠️ 原始 Excel 未能存到本機，下次重新整理可能又要重傳一次。\n\n"
                                         f"錯誤訊息：{_re_err}"
                                     )
                                 else:
@@ -708,63 +740,18 @@ with tab_label:
         st.markdown("### 出貨提醒設定")
         st.caption(
             "依客戶名稱比對，銷貨單解析後會在「產出標籤」顯示對應的出貨要求／備註。"
-            "可直接匯入每週更新的出貨要求 Excel（需含「出貨要求」工作表，欄位：客戶／出貨要求／備註），"
-            "或在下方表格直接編輯。"
+            f"直接即時讀取倉管維護的共用檔案（`{SHIPPING_NOTES_PATH}` 的「出貨要求」工作表），"
+            "不需要另外匯入，倉管更新那份檔案後這裡會自動反映最新內容。"
         )
-
-        _ship_import = st.file_uploader("匯入出貨要求 Excel", type=["xlsx", "xls"], key="ship_notes_import")
-        if _ship_import and st.button("匯入並覆蓋目前清單", key="ship_notes_import_btn"):
-            try:
-                _swb = openpyxl.load_workbook(BytesIO(_ship_import.read()), data_only=True)
-                if "出貨要求" not in _swb.sheetnames:
-                    st.error("找不到「出貨要求」工作表")
-                else:
-                    _sws = _swb["出貨要求"]
-                    _ship_rows = []
-                    for r in range(2, _sws.max_row + 1):
-                        cust = _sws.cell(row=r, column=1).value
-                        if not cust:
-                            continue
-                        _ship_rows.append({
-                            "客戶": str(cust).strip(),
-                            "出貨要求": str(_sws.cell(row=r, column=2).value or "").strip(),
-                            "備註": str(_sws.cell(row=r, column=3).value or "").strip(),
-                        })
-                    replace_shipping_notes(_ship_rows)
-                    clear_cache()
-                    st.success(f"已匯入 {len(_ship_rows)} 筆出貨提醒")
-                    st.rerun()
-            except Exception as _se:
-                st.error(f"匯入失敗：{_se}")
-
         try:
             _ship_notes_cur = load_shipping_notes()
+            st.dataframe(
+                pd.DataFrame(_ship_notes_cur) if _ship_notes_cur else pd.DataFrame(columns=["客戶", "出貨要求", "備註"]),
+                use_container_width=True,
+                hide_index=True,
+            )
         except Exception as _se2:
-            st.error(f"載入出貨提醒失敗：{_se2}")
-            _ship_notes_cur = []
-
-        _ship_df = pd.DataFrame(_ship_notes_cur or [{"客戶": "", "出貨要求": "", "備註": ""}])
-        _ship_edited = st.data_editor(
-            _ship_df,
-            num_rows="dynamic",
-            use_container_width=True,
-            hide_index=True,
-            key="ship_notes_editor",
-        )
-        if st.button("儲存出貨提醒", key="ship_notes_save_btn"):
-            _ship_rows2 = [
-                {
-                    "客戶": str(r.get("客戶", "")).strip(),
-                    "出貨要求": str(r.get("出貨要求", "")).strip(),
-                    "備註": str(r.get("備註", "")).strip(),
-                }
-                for r in _ship_edited.to_dict("records")
-                if str(r.get("客戶", "")).strip()
-            ]
-            replace_shipping_notes(_ship_rows2)
-            clear_cache()
-            st.success("已儲存")
-            st.rerun()
+            st.error(f"讀取出貨提醒失敗：{_se2}")
 
     # ── 從廠商網站下載標籤 ───────────────────────────────────────
     with sub_tab_erp:
@@ -824,7 +811,6 @@ with tab_label:
                     if _vname and _vurl:
                         try:
                             save_vendor(_vname, _vurl, _vuser, _vpass)
-                            clear_cache()
                             st.session_state.show_add_vendor = False
                             st.session_state.vendor_selected = _vname
                             st.rerun()
@@ -848,7 +834,6 @@ with tab_label:
                         if st.button(f"🗑 刪除「{_sel_v}」", key="del_vendor_btn"):
                             try:
                                 delete_vendor(_sel_v)
-                                clear_cache()
                                 st.session_state.vendor_selected = ""
                                 st.rerun()
                             except Exception as _de:
@@ -1020,7 +1005,7 @@ async function copyLabel_{btn_id}(){{
     # ── LSCR 確認單直接產出 ────────────────────────────────────────
     with sub_tab_lscr:
         st.caption("上傳 LSCR 出貨明細確認單（xlsx），自動解析明細並用內建 lable 工作表產出標籤"
-                   "（若檔案只有 list 沒有 lable，會自動沿用雲端的預設模板0）")
+                   "（若檔案只有 list 沒有 lable，會自動沿用本機的預設模板0）")
 
         _lscr_up = st.file_uploader(
             "上傳 LSCR 確認單 xlsx",
@@ -1037,25 +1022,24 @@ async function copyLabel_{btn_id}(){{
                     st.error("此檔案缺少工作表：list")
                     _tmpl_bytes = None
                 elif "lable" in _wb_data.sheetnames:
-                    # 這次上傳的檔案自帶 lable：直接用它，並在雲端還沒有模板0 時存一份
+                    # 這次上傳的檔案自帶 lable：直接用它，並在本機還沒有模板0 時存一份
                     # （只存第一次，之後不再覆蓋，避免之後上傳的檔案版型跑掉時把模板0 也帶壞）
                     _tmpl_bytes = _lscr_bytes
                     try:
                         if not find_lscr_base_template_id():
                             save_lscr_base_template(_lscr_bytes)
-                            download_lscr_base_template.clear()
-                            st.info("已將本次的 lable 版型另存為雲端預設模板0，"
+                            st.info("已將本次的 lable 版型另存為本機預設模板0，"
                                     "之後上傳只有 list 的檔案會自動沿用。")
                     except Exception as _sav_e:
-                        st.warning(f"雲端模板0 儲存失敗（不影響本次產出）：{_sav_e}")
+                        st.warning(f"本機模板0 儲存失敗（不影響本次產出）：{_sav_e}")
                 else:
-                    # 檔案只有 list 沒有 lable：沿用雲端的預設模板0
+                    # 檔案只有 list 沒有 lable：沿用本機的預設模板0
                     _base_bytes = download_lscr_base_template()
                     if _base_bytes:
                         _tmpl_bytes = _base_bytes
-                        st.caption("此檔案沒有 lable 工作表，已自動沿用雲端預設模板0 排版")
+                        st.caption("此檔案沒有 lable 工作表，已自動沿用本機預設模板0 排版")
                     else:
-                        st.error("此檔案缺少工作表：lable，且雲端尚無預設模板0 可沿用"
+                        st.error("此檔案缺少工作表：lable，且本機尚無預設模板0 可沿用"
                                  "（請先上傳一份含 lable 工作表的檔案，之後才能沿用）")
                         _tmpl_bytes = None
 
@@ -1181,7 +1165,6 @@ with tab_invoice:
                     )
                     if _del_target and st.button("刪除選定客戶", key="inv_skip_del_btn"):
                         delete_invoice_skip(_del_target)
-                        clear_cache()
                         st.rerun()
                 else:
                     st.caption("目前沒有跳過名單")
@@ -1198,7 +1181,6 @@ with tab_invoice:
                     st.write("")
                     if st.button("新增", key="inv_skip_add_btn", use_container_width=True) and _new_skip_name.strip():
                         save_invoice_skip(_new_skip_name.strip(), _new_skip_reason.strip() or "不開立")
-                        clear_cache()
                         st.rerun()
 
             def _match_skip(customer: str) -> str | None:
@@ -1255,7 +1237,6 @@ with tab_invoice:
                         )
                         if _reset_no and st.button("清除記錄", key="einv_log_reset_btn"):
                             delete_einvoice_log(_reset_no)
-                            clear_cache()
                             st.rerun()
 
                 import einvoice_submitter as _einv
@@ -1315,11 +1296,26 @@ with tab_invoice:
                     _progress_area = st.empty()
                     _log_lines = []
 
+                    # 正式送出前先逐張「認領」：避免兩人同時處理到同一張銷貨單、
+                    # 都通過「尚未開立」的檢查後各自送出，開出兩張真實發票。
+                    # 測試模式不會真的送出，不需要搶認領。
+                    if st.session_state.einv_dry_run:
+                        _claimed_orders = orders_to_run
+                    else:
+                        _claimed_orders = []
+                        for o in orders_to_run:
+                            if try_claim_order(o.get("order_no", ""), o.get("customer_name", ""),
+                                                o.get("buyer_tax_id", "")):
+                                _claimed_orders.append(o)
+                            else:
+                                _log_lines.append(f"⏭️ {o.get('order_no','')} 已被其他人處理中或已開立，跳過")
+                        _progress_area.text("\n".join(_log_lines))
+
                     def _on_progress(i, total, order, result):
                         _mark = "✅" if result["success"] else ("🧪" if result.get("error") == "dry_run" else "❌")
                         _no = result.get("invoice_no") or ""
                         _err = "" if result["success"] or result.get("error") == "dry_run" else f"（{result.get('error','')}）"
-                        _log_lines.append(f"{_mark} {i+1}/{total} {order.get('order_no','')} {_no}{_err}")
+                        _log_lines.append(f"{_mark} {order.get('order_no','')} {_no}{_err}")
                         _progress_area.text("\n".join(_log_lines))
                         if result.get("error") != "dry_run":
                             save_einvoice_log(
@@ -1330,14 +1326,16 @@ with tab_invoice:
                                 "已開立" if result["success"] else "失敗",
                                 result.get("error", "") or "",
                             )
-                            clear_cache()
 
                     try:
-                        st.session_state.einv_last_results = _einv.submit_batch(
-                            st.session_state.einv_port, orders_to_run,
-                            dry_run=st.session_state.einv_dry_run,
-                            on_progress=_on_progress,
-                        )
+                        if _claimed_orders:
+                            st.session_state.einv_last_results = _einv.submit_batch(
+                                st.session_state.einv_port, _claimed_orders,
+                                dry_run=st.session_state.einv_dry_run,
+                                on_progress=_on_progress,
+                            )
+                        else:
+                            st.session_state.einv_last_results = []
                     except Exception as _be:
                         st.error(f"送出中斷：{_be}")
                     finally:
