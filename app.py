@@ -268,44 +268,48 @@ with tab_label:
                     _rec = _fuzzy_match_customer(customer_name, _part_no_prefs)
                     return _rec.get("料號來源", LABEL_PART_NO_OWN) if _rec else LABEL_PART_NO_OWN
 
-                # 顯示選取的品項（出貨要求／備註併進同一張表的最後兩欄，不用另外分開顯示）
+                # 顯示選取的品項：每張銷貨單自己一段，出貨提醒當該單的標題只顯示一次，
+                # 底下接該單自己的品項表（不用把出貨提醒塞進表格欄位裡重複出現）
                 selected_items = [
                     (item, order)
                     for order in selected_orders
                     for item in order.get("items", [])
                 ]
                 if selected_items:
-                    _rows = []
-                    for item, order in selected_items:
+                    for order in selected_orders:
+                        _items = order.get("items", [])
+                        if not _items:
+                            continue
                         _note = _match_shipping_note(order.get("customer_name", ""))
-                        _rows.append({
-                            "銷貨單號": order.get("order_no", ""),
-                            "料號":     item.get("item_no", ""),
-                            "品名":     item.get("name", ""),
-                            "規格":     item.get("description", ""),
-                            "數量":     item.get("quantity", ""),
-                            "客戶料號": item.get("remark", ""),
-                            "批號":     item.get("lot_no", ""),
-                            "出貨要求": _note.get("出貨要求", "") if _note else "",
-                            "備註":     _note.get("備註", "") if _note else "",
-                        })
-                    st.dataframe(
-                        _rows,
-                        use_container_width=True,
-                        hide_index=True,
-                        height=min(420, 38 * (len(selected_items) + 1) + 10),
-                        column_config={
-                            "銷貨單號": st.column_config.TextColumn(width="medium"),
-                            "料號":     st.column_config.TextColumn(width="large"),
-                            "品名":     st.column_config.TextColumn(width="small"),
-                            "規格":     st.column_config.TextColumn(width="large"),
-                            "數量":     st.column_config.NumberColumn(width="small"),
-                            "客戶料號": st.column_config.TextColumn(width="medium"),
-                            "批號":     st.column_config.TextColumn(width="medium"),
-                            "出貨要求": st.column_config.TextColumn(width="large"),
-                            "備註":     st.column_config.TextColumn(width="large"),
-                        },
-                    )
+                        _header = f"**{order.get('order_no','')}** — {order.get('customer_name','')}"
+                        if _note:
+                            _req = _note.get("出貨要求", "").strip()
+                            _remark = _note.get("備註", "").strip()
+                            _note_text = "　".join(x for x in [_req, _remark] if x)
+                            if _note_text:
+                                _header += f"　⚠️ {_note_text}"
+                        st.markdown(_header)
+                        st.dataframe(
+                            [{
+                                "料號":     it.get("item_no", ""),
+                                "品名":     it.get("name", ""),
+                                "規格":     it.get("description", ""),
+                                "數量":     it.get("quantity", ""),
+                                "客戶料號": it.get("remark", ""),
+                                "批號":     it.get("lot_no", ""),
+                            } for it in _items],
+                            use_container_width=True,
+                            hide_index=True,
+                            height=min(420, 38 * (len(_items) + 1) + 10),
+                            column_config={
+                                "料號":     st.column_config.TextColumn(width="large"),
+                                "品名":     st.column_config.TextColumn(width="small"),
+                                "規格":     st.column_config.TextColumn(width="large"),
+                                "數量":     st.column_config.NumberColumn(width="small"),
+                                "客戶料號": st.column_config.TextColumn(width="medium"),
+                                "批號":     st.column_config.TextColumn(width="medium"),
+                            },
+                        )
                     st.caption(f"共 {len(selected_items)} 個品項，每張銷貨單一個工作表")
 
                     # ── 分裝設定 ─────────────────────────────────────────
