@@ -8,6 +8,7 @@ import json
 import re
 import tempfile
 from io import BytesIO
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -36,6 +37,8 @@ from local_db import (
     load_invoice_skip_list, save_invoice_skip, delete_invoice_skip,
     load_einvoice_log, save_einvoice_log, delete_einvoice_log, try_claim_order,
     load_shipping_notes, SHIPPING_NOTES_PATH,
+    load_label_part_no_prefs, save_label_part_no_pref, delete_label_part_no_pref,
+    LABEL_PART_NO_OWN, LABEL_PART_NO_CUSTOMER,
 )
 from module_d_report import (
     parse_daily_report_workbook,
@@ -69,6 +72,41 @@ def _read_uploaded_workbook(file_bytes: bytes, **kwargs):
             "請用 Excel 開啟後「另存新檔」成 .xlsx 格式，再重新上傳。"
         )
     return openpyxl.load_workbook(BytesIO(file_bytes), **kwargs)
+
+
+def _fuzzy_match_customer(customer_name: str, records: list[dict], key: str = "客戶") -> dict | None:
+    """
+    依客戶名稱比對清單：先完全包含（互為子字串）優先，找不到再用最長公共子字串 ≥ 3 字。
+    用於出貨提醒／標籤料號偏好等「依客戶名稱對照設定」的共用比對邏輯。
+    """
+    if not customer_name or not records:
+        return None
+
+    def _lcs_len(a: str, b: str) -> int:
+        best = 0
+        for i in range(len(a)):
+            for j in range(len(b)):
+                l = 0
+                while i + l < len(a) and j + l < len(b) and a[i + l] == b[j + l]:
+                    l += 1
+                if l > best:
+                    best = l
+        return best
+
+    for r in records:
+        cust = r.get(key, "")
+        if cust and (cust in customer_name or customer_name in cust):
+            return r
+
+    best_rec, best_len = None, 2
+    for r in records:
+        cust = r.get(key, "")
+        if cust:
+            ln = _lcs_len(customer_name, cust)
+            if ln > best_len:
+                best_len, best_rec = ln, r
+    return best_rec
+
 
 if "parsed_orders" not in st.session_state:
     st.session_state.parsed_orders = []
@@ -218,75 +256,45 @@ with tab_label:
                 )
                 selected_orders = [order_options[k] for k in selected_order_nos]
 
-                # 出貨提醒：依客戶名稱比對（完全包含，或最長公共子字串 ≥ 3 字）
+                # 出貨提醒：依客戶名稱比對
                 try:
                     _ship_notes = load_shipping_notes()
                 except Exception:
                     _ship_notes = []
 
                 def _match_shipping_note(customer_name: str):
-                    if not customer_name:
-                        return None
+                    return _fuzzy_match_customer(customer_name, _ship_notes)
 
-                    def _lcs_len(a: str, b: str) -> int:
-                        best = 0
-                        for i in range(len(a)):
-                            for j in range(len(b)):
-                                l = 0
-                                while i + l < len(a) and j + l < len(b) and a[i + l] == b[j + l]:
-                                    l += 1
-                                if l > best:
-                                    best = l
-                        return best
+                # 標籤料號偏好：依客戶名稱比對，決定該客戶要印本公司料號還是客戶料號
+                _part_no_prefs = load_label_part_no_prefs()
 
-                    for r in _ship_notes:
-                        cust = r.get("客戶", "")
-                        if cust and (cust in customer_name or customer_name in cust):
-                            return r
-                    best_rec, best_len = None, 2
-                    for r in _ship_notes:
-                        cust = r.get("客戶", "")
-                        if cust:
-                            ln = _lcs_len(customer_name, cust)
-                            if ln > best_len:
-                                best_len, best_rec = ln, r
-                    return best_rec
+                def _match_part_no_pref(customer_name: str) -> str:
+                    _rec = _fuzzy_match_customer(customer_name, _part_no_prefs)
+                    return _rec.get("料號來源", LABEL_PART_NO_OWN) if _rec else LABEL_PART_NO_OWN
 
-                if selected_orders:
-                    st.markdown("**銷貨單：**")
-                    for o in selected_orders:
-                        order_key = o.get("order_no", o.get("filename", ""))
-                        cname = o.get("customer_name", "")
-                        note = _match_shipping_note(cname)
-                        if note:
-                            _req = note.get("出貨要求", "").strip()
-                            _remark = note.get("備註", "").strip()
-                            with st.container(border=True):
-                                st.markdown(f"**{order_key}**　{cname or '未知客戶'}")
-                                if _req:
-                                    st.caption(f"⚠️ 出貨要求：{_req}")
-                                if _remark:
-                                    st.caption(f"📝 備註：{_remark}")
-                        else:
-                            st.caption(f"{order_key}　{cname or '未知客戶'}")
-
-                # 顯示選取的品項
+                # 顯示選取的品項（出貨要求／備註併進同一張表的最後兩欄，不用另外分開顯示）
                 selected_items = [
                     (item, order)
                     for order in selected_orders
                     for item in order.get("items", [])
                 ]
                 if selected_items:
+                    _rows = []
+                    for item, order in selected_items:
+                        _note = _match_shipping_note(order.get("customer_name", ""))
+                        _rows.append({
+                            "銷貨單號": order.get("order_no", ""),
+                            "料號":     item.get("item_no", ""),
+                            "品名":     item.get("name", ""),
+                            "規格":     item.get("description", ""),
+                            "數量":     item.get("quantity", ""),
+                            "客戶料號": item.get("remark", ""),
+                            "批號":     item.get("lot_no", ""),
+                            "出貨要求": _note.get("出貨要求", "") if _note else "",
+                            "備註":     _note.get("備註", "") if _note else "",
+                        })
                     st.dataframe(
-                        [{
-                            "銷貨單號": order.get("order_no",""),
-                            "料號":     item.get("item_no",""),
-                            "品名":     item.get("name",""),
-                            "規格":     item.get("description",""),
-                            "數量":     item.get("quantity",""),
-                            "客戶料號": item.get("remark",""),
-                            "批號":     item.get("lot_no",""),
-                        } for item, order in selected_items],
+                        _rows,
                         use_container_width=True,
                         hide_index=True,
                         height=min(420, 38 * (len(selected_items) + 1) + 10),
@@ -298,6 +306,8 @@ with tab_label:
                             "數量":     st.column_config.NumberColumn(width="small"),
                             "客戶料號": st.column_config.TextColumn(width="medium"),
                             "批號":     st.column_config.TextColumn(width="medium"),
+                            "出貨要求": st.column_config.TextColumn(width="large"),
+                            "備註":     st.column_config.TextColumn(width="large"),
                         },
                     )
                     st.caption(f"共 {len(selected_items)} 個品項，每張銷貨單一個工作表")
@@ -413,9 +423,17 @@ with tab_label:
                                     openpyxl.load_workbook(BytesIO(wb_bytes))
                                     if wb_bytes else openpyxl.Workbook()
                                 )
+                                _tinfo = template_from_json(rec["設定JSON"])
+                                if _match_part_no_pref(o.get("customer_name", "")) == LABEL_PART_NO_CUSTOMER:
+                                    # 該客戶偏好印客戶料號：只把「料號」欄位改指到 remark，
+                                    # 不動本來就顯示 remark（客戶料號）的其他欄位，避免誤改
+                                    _tinfo = json.loads(json.dumps(_tinfo))  # 深複製，不動到共用模板設定
+                                    for _c in _tinfo.get("cells", []):
+                                        if _c.get("field") == "item_no":
+                                            _c["field"] = "remark"
                                 pairs.append({
                                     "order": o,
-                                    "template_info": template_from_json(rec["設定JSON"]),
+                                    "template_info": _tinfo,
                                     "template_wb": twb,
                                     "template_bytes": wb_bytes,
                                     "vendor": rec.get("廠商名稱", ""),
@@ -752,6 +770,44 @@ with tab_label:
             )
         except Exception as _se2:
             st.error(f"讀取出貨提醒失敗：{_se2}")
+
+        st.divider()
+        st.markdown("### 標籤料號偏好設定")
+        st.caption(
+            "標籤模板已改成全公司共用一份，「料號」欄位預設印本公司料號；"
+            "依客戶名稱比對，這裡設定過的客戶會改印客戶料號，設定一次之後每次產出標籤都會自動套用。"
+        )
+        _part_no_prefs_cur = load_label_part_no_prefs()
+        if _part_no_prefs_cur:
+            st.dataframe(
+                pd.DataFrame(_part_no_prefs_cur),
+                use_container_width=True,
+                hide_index=True,
+            )
+            _pn_del_target = st.selectbox(
+                "選擇要刪除的客戶（刪除後該客戶恢復印本公司料號）",
+                [""] + [r.get("客戶", "") for r in _part_no_prefs_cur],
+                key="part_no_del_sel",
+            )
+            if _pn_del_target and st.button("刪除選定客戶", key="part_no_del_btn"):
+                delete_label_part_no_pref(_pn_del_target)
+                st.rerun()
+        else:
+            st.caption("目前沒有設定，所有客戶都印本公司料號")
+
+        _pn_c1, _pn_c2, _pn_c3 = st.columns([2, 2, 1])
+        with _pn_c1:
+            _pn_new_customer = st.text_input(
+                "客戶名稱（比對銷貨單客戶名稱，包含即算符合）", key="part_no_new_customer")
+        with _pn_c2:
+            _pn_new_choice = st.selectbox(
+                "料號來源", [LABEL_PART_NO_CUSTOMER, LABEL_PART_NO_OWN], key="part_no_new_choice")
+        with _pn_c3:
+            st.write("")
+            st.write("")
+            if st.button("新增／更新", key="part_no_add_btn", use_container_width=True) and _pn_new_customer.strip():
+                save_label_part_no_pref(_pn_new_customer.strip(), _pn_new_choice)
+                st.rerun()
 
     # ── 從廠商網站下載標籤 ───────────────────────────────────────
     with sub_tab_erp:
@@ -1482,43 +1538,89 @@ with tab_invoice:
 # ════════════════════════════════════════════════════════════════
 #  報表彙總
 # ════════════════════════════════════════════════════════════════
+_REPORT_FOLDER = Path(r"\\192.168.10.253\a10 210專區\生產日報表")
+
+
+def _scan_report_files() -> list:
+    """掃描月報表資料夾，排除 Excel 開啟時的鎖定暫存檔（~$開頭）跟範本檔（檔名含「範本」）。"""
+    if not _REPORT_FOLDER.exists():
+        return []
+    files = [
+        p for p in _REPORT_FOLDER.glob("*.xlsx")
+        if not p.name.startswith("~$") and "範本" not in p.name
+    ]
+    return sorted(files, key=lambda p: p.name)
+
+
+def _report_month_label(path) -> str:
+    m = re.match(r"(\d{1,2})\s*月", path.name)
+    return f"{m.group(1)}月" if m else path.stem
+
+
+def _run_report_aggregation(name: str, file_bytes: bytes) -> dict:
+    """跑完整套解析＋彙總，回傳結果 dict（含 error 代表失敗）給畫面顯示用。"""
+    try:
+        wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
+        long_df = parse_daily_report_workbook(wb)
+        if long_df.empty:
+            return {"error": "找不到可解析的資料，請確認檔案格式（工作表需有「日期」「料號」標題列）"}
+        wide_df = aggregate_daily_report(long_df)
+        return {"wide": wide_df, "bytes": file_bytes, "name": name}
+    except Exception as e:
+        import traceback as _rtb
+        return {"error": f"{e}\n\n{_rtb.format_exc()}"}
+
+
 with tab_report:
-    st.caption("上傳生產日報表 Excel（各站/各人員工作表），依「日期＋料號＋站」彙總，同一天同一料號在同一站的數量會自動加總")
+    st.caption("依「日期＋料號＋站」彙總，同一天同一料號在同一站的數量會自動加總")
 
-    _report_file = st.file_uploader("選擇生產日報表 Excel", type=["xlsx", "xlsm"], key="report_uploader")
+    _report_files = _scan_report_files()
+    _month_opts = {_report_month_label(p): p for p in _report_files}
 
-    if _report_file and st.button("彙總報表", type="primary", key="report_gen_btn"):
+    if _report_files:
+        st.success(f"從 `{_REPORT_FOLDER}` 自動讀取到 {len(_report_files)} 份月報表")
+        _sel_months = st.multiselect(
+            "選擇要匯出的月份（各月各自獨立產出一份彙總檔案）",
+            options=list(_month_opts.keys()),
+            default=list(_month_opts.keys()),
+        )
+    else:
+        st.warning(f"讀不到資料夾 `{_REPORT_FOLDER}`（可能是網路磁碟沒連線或沒有權限），可改用下方手動上傳")
+        _sel_months = []
+
+    if "report_results" not in st.session_state:
+        st.session_state["report_results"] = {}
+
+    if _sel_months and st.button("彙總選中的月份", type="primary", key="report_gen_btn"):
+        with st.spinner(f"彙總 {len(_sel_months)} 份月報表中..."):
+            for _m in _sel_months:
+                _p = _month_opts[_m]
+                st.session_state["report_results"][_m] = _run_report_aggregation(_p.stem, _p.read_bytes())
+
+    with st.expander("或手動上傳其他檔案（不在上面資料夾裡的）"):
+        _report_file = st.file_uploader("選擇生產日報表 Excel", type=["xlsx", "xlsm"], key="report_uploader")
+        if _report_file and st.button("彙總此檔案", key="report_manual_btn"):
+            _name = re.sub(r"\.xlsx?$", "", _report_file.name, flags=re.IGNORECASE)
+            with st.spinner("彙總中..."):
+                st.session_state["report_results"][_name] = _run_report_aggregation(_name, _report_file.read())
+
+    for _m, _result in st.session_state["report_results"].items():
+        st.divider()
+        st.markdown(f"### {_m}")
+        if _result.get("error"):
+            st.error(_result["error"])
+            continue
+        st.dataframe(_result["wide"], use_container_width=True, hide_index=True)
         try:
-            _report_bytes = _report_file.read()
-            _report_wb = openpyxl.load_workbook(BytesIO(_report_bytes), data_only=True)
-            _report_long = parse_daily_report_workbook(_report_wb)
-            if _report_long.empty:
-                st.warning("找不到可解析的資料，請確認檔案格式（工作表需有「日期」「料號」標題列）")
-            else:
-                _report_wide = aggregate_daily_report(_report_long)
-                st.session_state["report_wide"] = _report_wide
-                st.session_state["report_source_bytes"] = _report_bytes
-                st.session_state["report_source_name"] = _report_file.name
-                st.success(f"彙總完成，共 {len(_report_wide)} 筆（日期 × 料號）")
-        except Exception as _re:
-            import traceback as _rtb
-            st.error(f"彙總失敗：{_re}")
-            st.code(_rtb.format_exc())
-
-    if st.session_state.get("report_wide") is not None and not st.session_state["report_wide"].empty:
-        _report_wide = st.session_state["report_wide"]
-        st.dataframe(_report_wide, use_container_width=True, hide_index=True)
-
-        try:
-            _report_wb_out = openpyxl.load_workbook(BytesIO(st.session_state["report_source_bytes"]))
-            _report_buf = build_summary_workbook(_report_wb_out, _report_wide)
-            _report_base = re.sub(r"\.xlsx?$", "", st.session_state.get("report_source_name", "報表彙總"), flags=re.IGNORECASE)
+            _wb_out = openpyxl.load_workbook(BytesIO(_result["bytes"]))
+            _buf = build_summary_workbook(_wb_out, _result["wide"])
             st.download_button(
-                "⬇️ 下載報表彙總.xlsx",
-                data=_report_buf,
-                file_name=f"{_report_base}_已彙總.xlsx",
+                f"⬇️ 下載 {_result['name']}_已彙總.xlsx",
+                data=_buf,
+                file_name=f"{_result['name']}_已彙總.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
+                key=f"report_dl_{_m}",
             )
         except Exception as _rwe:
             import traceback as _rwtb

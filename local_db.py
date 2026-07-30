@@ -26,7 +26,9 @@ _EINVOICE_LOG_FILE = _BASE_DIR / "einvoice_log.json"
 _EINVOICE_LOG_LOCK = _BASE_DIR / "einvoice_log.lock"
 
 # 出貨提醒直接讀這份共用檔案，不再自己存一份／提供匯入功能
-SHIPPING_NOTES_PATH = Path(r"Z:\倉管\訂購單預交-每週出貨.xlsx")
+# 用 UNC 路徑（而不是 Z: 之類的對應磁碟機代號），因為不同電腦/帳號的磁碟機代號設定可能不一樣，
+# UNC 路徑不管在哪台機器上都一樣。
+SHIPPING_NOTES_PATH = Path(r"\\192.168.10.253\a08 共用區\倉管\訂購單預交-每週出貨.xlsx")
 _SHIPPING_NOTES_SHEET = "出貨要求"
 
 # 「處理中」狀態超過這個時間還沒轉成「已開立」或「失敗」，視為呼叫端已經當掉/中斷，
@@ -68,6 +70,34 @@ def save_vendor(name: str, url: str, username: str, password: str):
 def delete_vendor(name: str):
     records = [r for r in _load(_VENDORS_FILE) if r.get("公司名稱") != name]
     _save(_VENDORS_FILE, records)
+
+
+# ── 標籤料號偏好（客戶名稱 → 印本公司料號 or 客戶料號）──────────────────────
+
+_LABEL_PART_NO_FILE = _BASE_DIR / "label_part_no_prefs.json"
+LABEL_PART_NO_OWN = "本公司料號"
+LABEL_PART_NO_CUSTOMER = "客戶料號"
+
+
+def load_label_part_no_prefs() -> list[dict]:
+    return _load(_LABEL_PART_NO_FILE)
+
+
+def save_label_part_no_pref(customer: str, choice: str):
+    """choice：LABEL_PART_NO_OWN 或 LABEL_PART_NO_CUSTOMER。"""
+    records = _load(_LABEL_PART_NO_FILE)
+    for r in records:
+        if r.get("客戶") == customer:
+            r["料號來源"] = choice
+            _save(_LABEL_PART_NO_FILE, records)
+            return
+    records.append({"客戶": customer, "料號來源": choice})
+    _save(_LABEL_PART_NO_FILE, records)
+
+
+def delete_label_part_no_pref(customer: str):
+    records = [r for r in _load(_LABEL_PART_NO_FILE) if r.get("客戶") != customer]
+    _save(_LABEL_PART_NO_FILE, records)
 
 
 # ── 電子發票：跳過名單 ──────────────────────────────────────────────
