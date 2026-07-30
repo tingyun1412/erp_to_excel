@@ -118,14 +118,10 @@ if "einv_pid" not in st.session_state:
     st.session_state.einv_pid = None
 if "einv_logged_in" not in st.session_state:
     st.session_state.einv_logged_in = False
-if "einv_review_confirmed" not in st.session_state:
-    st.session_state.einv_review_confirmed = False
-if "einv_batch_running" not in st.session_state:
-    st.session_state.einv_batch_running = False
-if "einv_last_results" not in st.session_state:
-    st.session_state.einv_last_results = []
 if "einv_dry_run" not in st.session_state:
     st.session_state.einv_dry_run = True
+if "einv_pending_order" not in st.session_state:
+    st.session_state.einv_pending_order = None
 
 
 
@@ -1268,27 +1264,28 @@ with tab_invoice:
                     ]
                     st.warning(f"{len(_skipped)} 張因客戶在跳過名單中而略過：" + "、".join(_skip_lines))
 
-                # ── 已開立過的（依銷貨單號查記錄）從送出清單濾掉，避免重複送出 ──
+                # ── 已開立過／正在處理中的（依銷貨單號查記錄）從送出清單濾掉，避免重複送出 ──
                 _einv_log = load_einvoice_log()
-                _invoiced_map = {
-                    r.get("銷貨單號"): r.get("發票號碼")
-                    for r in _einv_log if r.get("狀態") == "已開立"
+                _excluded_map = {
+                    r.get("銷貨單號"): r
+                    for r in _einv_log if r.get("狀態") in ("已開立", "處理中")
                 }
-                _already_invoiced = [o for o in _eligible if o.get("order_no") in _invoiced_map]
-                _not_yet = [o for o in _eligible if o.get("order_no") not in _invoiced_map]
+                _already_excluded = [o for o in _eligible if o.get("order_no") in _excluded_map]
+                _not_yet = [o for o in _eligible if o.get("order_no") not in _excluded_map]
 
-                if _already_invoiced:
-                    with st.expander(f"✅ {len(_already_invoiced)} 張已開立過發票（不會重複送出）"):
+                if _already_excluded:
+                    with st.expander(f"⏸️ {len(_already_excluded)} 張已開立或正在處理中（不會重複送出）"):
                         st.dataframe(
                             [{"銷貨單號": o.get("order_no", ""),
                               "客戶": o.get("customer_name") or o.get("customer_code", ""),
-                              "發票號碼": _invoiced_map.get(o.get("order_no"), "")}
-                             for o in _already_invoiced],
+                              "狀態": _excluded_map.get(o.get("order_no"), {}).get("狀態", ""),
+                              "發票號碼": _excluded_map.get(o.get("order_no"), {}).get("發票號碼", "")}
+                             for o in _already_excluded],
                             use_container_width=True, hide_index=True,
                         )
                         _reset_no = st.selectbox(
-                            "若該筆發票已在網站上作廢，可清除記錄讓它重新送出",
-                            [""] + [o.get("order_no", "") for o in _already_invoiced],
+                            "若該筆發票已在網站上作廢、或「處理中」卡住了，可清除記錄讓它重新送出",
+                            [""] + [o.get("order_no", "") for o in _already_excluded],
                             key="einv_log_reset_sel",
                         )
                         if _reset_no and st.button("清除記錄", key="einv_log_reset_btn"):
@@ -1304,7 +1301,7 @@ with tab_invoice:
 
                 if _core_orders:
                     _core_lines = [f"{o.get('order_no','(未知)')}／{o.get('customer_name','')}" for o in _core_orders]
-                    st.warning("核心會員（日月光等）發票流程尚未支援自動送出，請人工於網站開立：" + "、".join(_core_lines))
+                    st.warning("核心會員（日月光）發票流程尚未支援自動送出，請人工於網站開立：" + "、".join(_core_lines))
 
                 st.caption("發票人統編：**24405403**　受票人統編：從銷貨單統一編號")
 
@@ -1347,114 +1344,102 @@ with tab_invoice:
                 if st.session_state.einv_port and not st.session_state.einv_logged_in:
                     st.info("請在跳出的瀏覽器視窗輸入帳號密碼並完成圖形驗證碼登入，完成後按「我已完成登入，檢查連線」")
 
-                def _run_einv_batch(orders_to_run):
-                    st.session_state.einv_batch_running = True
-                    _progress_area = st.empty()
-                    _log_lines = []
-
-                    # 正式送出前先逐張「認領」：避免兩人同時處理到同一張銷貨單、
-                    # 都通過「尚未開立」的檢查後各自送出，開出兩張真實發票。
-                    # 測試模式不會真的送出，不需要搶認領。
-                    if st.session_state.einv_dry_run:
-                        _claimed_orders = orders_to_run
-                    else:
-                        _claimed_orders = []
-                        for o in orders_to_run:
-                            if try_claim_order(o.get("order_no", ""), o.get("customer_name", ""),
-                                                o.get("buyer_tax_id", "")):
-                                _claimed_orders.append(o)
-                            else:
-                                _log_lines.append(f"⏭️ {o.get('order_no','')} 已被其他人處理中或已開立，跳過")
-                        _progress_area.text("\n".join(_log_lines))
-
-                    def _on_progress(i, total, order, result):
-                        _mark = "✅" if result["success"] else ("🧪" if result.get("error") == "dry_run" else "❌")
-                        _no = result.get("invoice_no") or ""
-                        _err = "" if result["success"] or result.get("error") == "dry_run" else f"（{result.get('error','')}）"
-                        _log_lines.append(f"{_mark} {order.get('order_no','')} {_no}{_err}")
-                        _progress_area.text("\n".join(_log_lines))
-                        if result.get("error") != "dry_run":
-                            save_einvoice_log(
-                                order.get("order_no", ""),
-                                order.get("customer_name", ""),
-                                order.get("buyer_tax_id", ""),
-                                result.get("invoice_no", ""),
-                                "已開立" if result["success"] else "失敗",
-                                result.get("error", "") or "",
-                            )
-
-                    try:
-                        if _claimed_orders:
-                            st.session_state.einv_last_results = _einv.submit_batch(
-                                st.session_state.einv_port, _claimed_orders,
-                                dry_run=st.session_state.einv_dry_run,
-                                on_progress=_on_progress,
-                            )
-                        else:
-                            st.session_state.einv_last_results = []
-                    except Exception as _be:
-                        st.error(f"送出中斷：{_be}")
-                    finally:
-                        st.session_state.einv_batch_running = False
-
                 if st.session_state.einv_logged_in and _general_orders:
-                    st.success(f"已連線，{len(_general_orders)} 張待送出")
+                    st.success(f"已連線，{len(_general_orders)} 張待處理")
 
                     st.session_state.einv_dry_run = st.checkbox(
-                        "測試模式（表單照樣填完，但按「放棄開立」而不是真的送出）",
+                        "測試模式（表單照樣填完，但自動按「放棄開立」，不會真的送出、也不會留下記錄）",
                         value=st.session_state.einv_dry_run, key="einv_dry_run_cb",
                     )
-                    if not st.session_state.einv_dry_run:
-                        st.warning("⚠️ 測試模式已關閉，送出後會是真實發票，號碼由網站配發、無法撤銷")
 
-                    with st.expander("📋 送出前確認內容", expanded=True):
-                        for o in _general_orders:
-                            _amt = sum(
-                                (it.get("quantity", 0) or 0) * (it.get("unit_price", 0) or 0)
-                                for it in o.get("items", [])
-                            )
-                            _tax_id = o.get("buyer_tax_id") or "⚠️缺"
+                    if st.session_state.einv_dry_run:
+                        # 測試模式：一次全部跑完，每張都自動放棄開立，純粹驗證欄位填寫邏輯
+                        with st.expander("📋 待處理清單", expanded=True):
+                            for o in _general_orders:
+                                _amt = sum((it.get("quantity", 0) or 0) * (it.get("unit_price", 0) or 0)
+                                           for it in o.get("items", []))
+                                st.caption(
+                                    f"**{o.get('order_no','')}** — {o.get('customer_name','')}"
+                                    f"（統編 {o.get('buyer_tax_id') or '⚠️缺'}）　未稅合計 {_amt:,.0f}"
+                                )
+
+                        if st.button("測試模式：全部跑一次", type="primary",
+                                     use_container_width=True, key="einv_dryrun_btn"):
+                            _progress_area = st.empty()
+                            _log_lines = []
+
+                            def _on_progress(i, total, order, result):
+                                _mark = "🧪" if result.get("state") == "dry_run_cancelled" else "❌"
+                                _err = f"（{result.get('error','')}）" if result.get("error") else ""
+                                _log_lines.append(f"{_mark} {order.get('order_no','')}{_err}")
+                                _progress_area.text("\n".join(_log_lines))
+
+                            _einv.dry_run_batch(st.session_state.einv_port, _general_orders, on_progress=_on_progress)
+
+                    else:
+                        # 正式送出：一次只處理一筆，填完停在瀏覽器畫面上，等人工親自按「開立發票」
+                        st.warning("⚠️ 測試模式已關閉，接下來會是真實發票，號碼由網站配發、無法撤銷")
+
+                        if not st.session_state.get("einv_pending_order"):
+                            _next_order = _general_orders[0]
+                            _amt = sum((it.get("quantity", 0) or 0) * (it.get("unit_price", 0) or 0)
+                                       for it in _next_order.get("items", []))
                             st.markdown(
-                                f"**{o.get('order_no','')}** — {o.get('customer_name','')}"
-                                f"（統編 {_tax_id}）　未稅合計 {_amt:,.0f}"
+                                f"下一筆：**{_next_order.get('order_no','')}** — {_next_order.get('customer_name','')}"
+                                f"（統編 {_next_order.get('buyer_tax_id') or '⚠️缺'}）　未稅合計 {_amt:,.0f}"
                             )
                             st.dataframe(
                                 [{"品名": it.get("name", ""), "單位": it.get("unit", "PCS"),
-                                  "數量": it.get("quantity", 0), "單價": it.get("unit_price", 0)}
-                                 for it in o.get("items", [])],
+                                  "數量": it.get("quantity", 0), "單價": it.get("unit_price", 0),
+                                  "客戶料號": it.get("remark", "")}
+                                 for it in _next_order.get("items", [])],
                                 use_container_width=True, hide_index=True,
                             )
-
-                    _confirmed = st.checkbox("我已確認以上資料正確，同意送出開立", key="einv_confirm_cb")
-                    st.session_state.einv_review_confirmed = _confirmed
-
-                    if st.button(
-                        "開始送出", type="primary", use_container_width=True, key="einv_submit_btn",
-                        disabled=not _confirmed or st.session_state.einv_batch_running,
-                    ):
-                        _run_einv_batch(_general_orders)
-                        st.rerun()
-
-                if st.session_state.einv_last_results:
-                    _res = st.session_state.einv_last_results
-                    _ok = [r for r in _res if r["success"]]
-                    _fail = [r for r in _res if not r["success"] and r.get("error") != "dry_run"]
-                    st.markdown("### 送出結果")
-                    if _ok:
-                        st.success("成功 " + str(len(_ok)) + " 張：" + "、".join(
-                            f"{r['order_no']}({r.get('invoice_no') or '號碼待查'})" for r in _ok
-                        ))
-                    if _fail:
-                        st.error("失敗 " + str(len(_fail)) + " 張：" + "、".join(
-                            f"{r['order_no']}（{r.get('error','')}）" for r in _fail
-                        ))
-                        if st.button("只重試失敗項目", key="einv_retry_btn",
-                                      disabled=st.session_state.einv_batch_running):
-                            _retry_nos = {r["order_no"] for r in _fail}
-                            _retry_orders = [o for o in _general_orders if o.get("order_no") in _retry_nos]
-                            if _retry_orders:
-                                _run_einv_batch(_retry_orders)
+                            if st.button("把這筆填進瀏覽器", type="primary",
+                                         use_container_width=True, key="einv_fill_btn"):
+                                if try_claim_order(_next_order.get("order_no", ""), _next_order.get("customer_name", ""),
+                                                    _next_order.get("buyer_tax_id", "")):
+                                    _fill_result = _einv.fill_one_order_via_port(
+                                        st.session_state.einv_port, _next_order, dry_run=False)
+                                    if _fill_result.get("state") == "filled_awaiting_manual_submit":
+                                        st.session_state.einv_pending_order = _next_order
+                                    else:
+                                        save_einvoice_log(
+                                            _next_order.get("order_no", ""), _next_order.get("customer_name", ""),
+                                            _next_order.get("buyer_tax_id", ""), "", "失敗",
+                                            _fill_result.get("error", "") or "填表失敗",
+                                        )
+                                        st.error(f"填表失敗：{_fill_result.get('error')}")
+                                else:
+                                    st.error("認領失敗，可能有其他人正在處理這張銷貨單，稍後重新整理再試")
                                 st.rerun()
+                        else:
+                            _pending = st.session_state.einv_pending_order
+                            st.info(
+                                f"已將「{_pending.get('order_no','')}」的資料填進瀏覽器視窗，"
+                                "請切換過去確認內容後，**親自在瀏覽器裡按下「開立發票」**（或「放棄開立」）。"
+                            )
+                            _pc1, _pc2 = st.columns(2)
+                            with _pc1:
+                                if st.button("✅ 已在瀏覽器按下開立發票，查詢號碼並記錄",
+                                             type="primary", use_container_width=True, key="einv_confirm_sent_btn"):
+                                    _no = _einv.lookup_invoice_no_via_port(
+                                        st.session_state.einv_port, _pending.get("order_no", ""))
+                                    save_einvoice_log(
+                                        _pending.get("order_no", ""), _pending.get("customer_name", ""),
+                                        _pending.get("buyer_tax_id", ""), _no or "", "已開立",
+                                        "" if _no else "已送出但查無發票號碼，需到查詢作業手動確認",
+                                    )
+                                    if not _no:
+                                        st.warning("已記錄為已開立，但沒查到發票號碼，麻煩到「查詢作業」手動確認並回來補上")
+                                    st.session_state.einv_pending_order = None
+                                    st.rerun()
+                            with _pc2:
+                                if st.button("❌ 取消這筆（按了放棄開立／沒有送出）",
+                                             use_container_width=True, key="einv_cancel_pending_btn"):
+                                    delete_einvoice_log(_pending.get("order_no", ""))
+                                    st.session_state.einv_pending_order = None
+                                    st.rerun()
 
     # ── 月結（驗收資訊 xlsx） ─────────────────────────────────────
     with _inv_tab_monthly:

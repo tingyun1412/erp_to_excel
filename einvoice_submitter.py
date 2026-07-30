@@ -1,12 +1,18 @@
 """
 電子發票逐張送出
-把銷貨單資料逐張餵進 e-invoice.com.tw「一般會員發票開立」表單並送出。
+把銷貨單資料逐張餵進 e-invoice.com.tw「一般會員發票開立」表單。
 
 登入頁有圖形驗證碼，無法全自動：先用 launch_login_browser() 開一個有畫面的
-瀏覽器讓人工完成登入，再用 submit_batch() 連回同一個瀏覽器逐張送單。
+瀏覽器讓人工完成登入（user-data-dir 用固定目錄，之後一段時間內重開還留著登入
+session，不用每次都重新過驗證碼），之後用 fill_one_order() 連回同一個瀏覽器
+逐張把表單填好。
 
-只支援「一般會員」流程。核心會員（日月光等）表單結構尚未確認，
-resolve_member_type() 會把這些客戶標成 "core"，呼叫端應排除、不要送進 submit_batch。
+重要：真正送出（dry_run=False）時，填完表單後絕對不會自動按「開立發票」——
+這一步一定要由人工在瀏覽器視窗裡親自確認、親自按下去，程式只負責填欄位。
+只有測試用的 dry_run=True 模式會自動按「放棄開立」收尾，不會留下任何紀錄。
+
+只支援「一般會員」流程。核心會員（目前只有日月光）表單結構尚未確認，
+resolve_member_type() 會把這些客戶標成 "core"，呼叫端應排除、不要送進 fill_one_order。
 """
 import socket
 import subprocess
@@ -19,11 +25,8 @@ ISSUE_BUTTON_SELECTOR  = 'input[type="button"][value="開立發票"]'
 CANCEL_BUTTON_SELECTOR = 'input[type="button"][value="放棄開立"]'
 ADD_ITEM_SELECTOR      = "#idAddButton"
 
-# 目前已知的核心會員（日月光等 8 家），表單流程尚未實作，僅用來排除、不進 submit_batch
-CORE_MEMBER_CUSTOMERS = [
-    "台塑", "南亞", "台化", "台塑石化",  # 台塑集團
-    "景碩", "富采", "日月光", "欣興", "南茂", "中華精測", "台亞半導體",
-]
+# 核心會員只有日月光，其餘一律走一般會員流程
+CORE_MEMBER_CUSTOMERS = ["日月光"]
 
 _PROFILE_DIR = Path.home() / ".cache" / "einvoice_chrome_profile"
 
@@ -119,8 +122,11 @@ def close_login_browser(pid: int):
 
 # ── 表單填寫 ────────────────────────────────────────────────────────
 
-def _fill_item_row(page, index: int, item: dict, order_no: str):
-    """填第 index 項（0 起算）的品項欄位。index > 0 前要先按「新增項次」。"""
+def _fill_item_row(page, index: int, item: dict, customer_order_no: str):
+    """
+    填第 index 項（0 起算）的品項欄位。index > 0 前要先按「新增項次」。
+    相關號碼一＝客戶訂單號碼，相關號碼二＝客戶料號（不是我們自己的銷貨單號／料號）。
+    """
     if index > 0:
         page.click(ADD_ITEM_SELECTOR)
         page.wait_for_timeout(300)
@@ -130,7 +136,7 @@ def _fill_item_row(page, index: int, item: dict, order_no: str):
     unit = (item.get("unit") or "PCS").strip()
     qty = item.get("quantity", 0) or 0
     price = item.get("unit_price", 0) or 0
-    remark = (item.get("remark") or "").strip()
+    customer_part_no = (item.get("remark") or "").strip()  # 客戶料號
 
     page.fill(f'input[name="dc_mtnm_1_{index}"]', name or item.get("item_no", ""))
     if spec:
@@ -138,20 +144,27 @@ def _fill_item_row(page, index: int, item: dict, order_no: str):
     page.fill(f'input[name="dc_un1_1_{index}"]', unit)
     page.fill(f'input[name="dc_up_1_{index}"]', str(price))
     page.fill(f'input[name="dc_qty1_1_{index}"]', str(qty))
-    page.fill(f'input[name="dc_relno1_1_{index}"]', order_no)
-    if remark:
-        page.fill(f'input[name="dc_relno2_1_{index}"]', remark)
+    if customer_order_no:
+        page.fill(f'input[name="dc_relno1_1_{index}"]', customer_order_no)
+    if customer_part_no:
+        page.fill(f'input[name="dc_relno2_1_{index}"]', customer_part_no)
 
 
-def submit_one_order(page, order: dict, dry_run: bool = True) -> dict:
+def fill_one_order(page, order: dict, dry_run: bool = True) -> dict:
     """
-    送出單一銷貨單的一般會員發票。
-    回傳 {"success": bool, "invoice_no": str | None, "error": str | None, "name_mismatch": bool}
-    dry_run=True 時，表單填完後按「放棄開立」而不是真的送出。
+    把單一銷貨單的資料填進「一般會員發票開立」表單。
+    回傳 {"state": ..., "error": str | None, "name_mismatch": bool}
+    state：
+      "filled_awaiting_manual_submit" —— 已填完，表單留在畫面上等人工在瀏覽器裡親自按「開立發票」
+      "dry_run_cancelled"             —— 測試模式，已自動按「放棄開立」收尾，沒有留下任何紀錄
+      "error"                         —— 失敗，看 error 欄位
+    這個函式本身絕對不會按「開立發票」——dry_run=False 時填完就停在畫面上，
+    要不要送出、什麼時候送出，都是人工在瀏覽器裡自己決定。
     """
     order_no = order.get("order_no", "")
+    customer_order_no = (order.get("customer_order_no") or order_no or "").strip()
     buyer_tax_id = (order.get("buyer_tax_id") or "").strip()
-    result = {"success": False, "invoice_no": None, "error": None, "name_mismatch": False}
+    result = {"state": "error", "error": None, "name_mismatch": False}
 
     if not buyer_tax_id:
         result["error"] = "銷貨單沒有受票人統一編號"
@@ -177,19 +190,18 @@ def submit_one_order(page, order: dict, dry_run: bool = True) -> dict:
             result["name_mismatch"] = True
 
         for idx, item in enumerate(items):
-            _fill_item_row(page, idx, item, order_no)
+            _fill_item_row(page, idx, item, customer_order_no)
 
+        # 整張發票層級的相關號碼：填我們自己的銷貨單號，之後用它反查真實發票號碼
         page.fill("#dc_relno_0", order_no)
 
         if dry_run:
             page.click(CANCEL_BUTTON_SELECTOR)
             page.wait_for_timeout(500)
-            result["error"] = "dry_run"
+            result["state"] = "dry_run_cancelled"
             return result
 
-        page.click(ISSUE_BUTTON_SELECTOR)
-        page.wait_for_load_state("networkidle", timeout=20_000)
-        result["success"] = True
+        result["state"] = "filled_awaiting_manual_submit"
         return result
 
     except Exception as e:
@@ -232,12 +244,35 @@ def lookup_invoice_no_by_relno(page, order_no: str) -> str | None:
         return None
 
 
-def submit_batch(port: int, orders: list[dict], dry_run: bool = True, on_progress=None) -> list[dict]:
+def _with_page(port: int, fn):
+    """連回已登入的瀏覽器、取得 page、執行 fn(page)、斷線（不 close，瀏覽器留給下次用）。"""
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as pw:
+        browser = pw.chromium.connect_over_cdp(f"http://localhost:{port}")
+        ctx = browser.contexts[0]
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        return fn(page)
+    # 注意：這裡刻意不呼叫 browser.close()——瀏覽器是外部登入用的 subprocess，
+    # 只是連線斷開，瀏覽器本身留著給下一次操作用，避免每次都要重新登入過驗證碼。
+
+
+def fill_one_order_via_port(port: int, order: dict, dry_run: bool = True) -> dict:
+    """連線→填一筆→斷線，包成一次呼叫，方便 Streamlit 每次按鈕互動各自獨立呼叫。"""
+    result = _with_page(port, lambda page: fill_one_order(page, order, dry_run=dry_run))
+    result["order_no"] = order.get("order_no", "")
+    result["customer_name"] = order.get("customer_name", "")
+    return result
+
+
+def lookup_invoice_no_via_port(port: int, order_no: str) -> str | None:
+    return _with_page(port, lambda page: lookup_invoice_no_by_relno(page, order_no))
+
+
+def dry_run_batch(port: int, orders: list[dict], on_progress=None) -> list[dict]:
     """
-    連回已登入的瀏覽器，逐張送出 orders（皆須為 resolve_member_type=="general"）。
+    測試模式專用：連回瀏覽器，逐張自動填寫＋自動按「放棄開立」，不會留下任何真實紀錄。
+    只用來驗證欄位填寫邏輯是否正確；真實送出一律要逐張人工確認，見 fill_one_order_via_port。
     單張失敗不中斷後面的（比照 erp_downloader.download_label_pdfs 的作法）。
-    on_progress(index, total, order, result) 會在每張處理完後呼叫，方便呼叫端即時更新畫面/寫入紀錄。
-    回傳每張的結果 list（跟 orders 同順序），每個 dict 額外帶 "order_no"/"customer_name"。
     """
     from playwright.sync_api import sync_playwright
 
@@ -251,11 +286,9 @@ def submit_batch(port: int, orders: list[dict], dry_run: bool = True, on_progres
 
         for i, order in enumerate(orders):
             try:
-                result = submit_one_order(page, order, dry_run=dry_run)
-                if result["success"] and not result.get("invoice_no"):
-                    result["invoice_no"] = lookup_invoice_no_by_relno(page, order.get("order_no", ""))
+                result = fill_one_order(page, order, dry_run=True)
             except Exception as e:
-                result = {"success": False, "invoice_no": None, "error": str(e), "name_mismatch": False}
+                result = {"state": "error", "error": str(e), "name_mismatch": False}
 
             result["order_no"] = order.get("order_no", "")
             result["customer_name"] = order.get("customer_name", "")
@@ -263,9 +296,5 @@ def submit_batch(port: int, orders: list[dict], dry_run: bool = True, on_progres
 
             if on_progress:
                 on_progress(i, total, order, result)
-
-        # 注意：這裡刻意不呼叫 browser.close()——瀏覽器是外部登入用的 subprocess，
-        # 只是連線斷開（跳出 with 區塊時 playwright driver 會自動斷線），
-        # 瀏覽器本身留著給下一批送單用，避免每批都要重新登入過驗證碼。
 
     return results

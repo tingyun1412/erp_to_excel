@@ -8,3 +8,4 @@ playwright
 PyMuPDF
 Pillow
 filelock>=3.13.0
+pywebview>=6.0
