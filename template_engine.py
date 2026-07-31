@@ -513,6 +513,13 @@ def _write_passthrough_to_sheet(ws_out, ws_tmpl, template_info: dict, orders: li
             out_col = ui * (columns_per_unit + gap_cols) + c_off + 1
             ws_out.column_dimensions[get_column_letter(out_col)].width = width
 
+    # 標籤單位之間的間距欄：跟 write_lscr_labels 的 D 欄一樣窄，不能漏設，
+    # 不然會沿用工作表預設欄寬，印出來間距跟 LSCR 標準尺寸對不起來。
+    for ui in range(max_slots):
+        for gap_offset in range(1, gap_cols + 1):
+            gap_col = ui * (columns_per_unit + gap_cols) + columns_per_unit + gap_offset
+            ws_out.column_dimensions[get_column_letter(gap_col)].width = _LABEL_GAP_WIDTH
+
     # 預計算 template 中在標籤範圍內的合併格
     unit_merges = [
         m for m in ws_tmpl.merged_cells.ranges
