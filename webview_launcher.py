@@ -60,10 +60,15 @@ def main():
     port = _free_port()
     log_fh = open(LOG_FILE, "a", encoding="utf-8")
     creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
+    # Windows 的 CreateProcess 不支援把 UNC 路徑（\\server\share\...）當成子行程的
+    # cwd 直接傳入，公司碟路徑就是這種格式，用了會直接啟動失敗。繞過方式：自己先
+    # os.chdir() 過去（這個沒有 UNC 限制），子行程不要再另外指定 cwd，讓它自動繼承
+    # 目前這個行程的工作目錄即可。
+    os.chdir(str(HERE))
     proc = subprocess.Popen(
         [sys.executable, "-m", "streamlit", "run", str(HERE / "app.py"),
          "--server.port", str(port), "--server.headless", "true"],
-        cwd=str(HERE),
         env=env,
         stdout=log_fh,
         stderr=subprocess.STDOUT,

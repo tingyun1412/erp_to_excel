@@ -4,5 +4,10 @@
 # 所以一定要限制成只有這台電腦自己能連。
 address = "127.0.0.1"
 
+# 程式放在公司網路碟（UNC 路徑）上執行時，Streamlit 預設的檔案監控（存檔自動重整）
+# 會去掃整個資料夾樹一輪，SMB 網路磁碟每個檔案操作都比本機慢很多，掃描會拖很久
+# 甚至看起來像卡死。這支 App 不需要「改程式碼自動重整」這個開發用功能，直接關掉。
+fileWatcherType = "none"
+
 [browser]
 gatherUsageStats = false
