@@ -159,6 +159,8 @@ def _fill_item_row(page, index: int, item: dict, customer_order_no: str):
     qty = item.get("quantity", 0) or 0
     price = item.get("unit_price", 0) or 0
     customer_part_no = (item.get("remark") or "").strip()  # 客戶料號
+    # 品項自己有指定的話優先用品項的（例如月結彙總發票，每個品項來自不同出貨單號）
+    item_customer_order_no = (item.get("customer_order_no") or customer_order_no or "").strip()
 
     page.fill(f'input[name="dc_mtnm_1_{index}"]', name or item.get("item_no", ""))
     if spec:
@@ -166,8 +168,8 @@ def _fill_item_row(page, index: int, item: dict, customer_order_no: str):
     page.fill(f'input[name="dc_un1_1_{index}"]', unit)
     page.fill(f'input[name="dc_up_1_{index}"]', str(price))
     page.fill(f'input[name="dc_qty1_1_{index}"]', str(qty))
-    if customer_order_no:
-        page.fill(f'input[name="dc_relno1_1_{index}"]', customer_order_no)
+    if item_customer_order_no:
+        page.fill(f'input[name="dc_relno1_1_{index}"]', item_customer_order_no)
     if customer_part_no:
         page.fill(f'input[name="dc_relno2_1_{index}"]', customer_part_no)
 
