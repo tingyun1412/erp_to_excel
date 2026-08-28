@@ -6,7 +6,6 @@
 """
 import json
 import re
-import tempfile
 from io import BytesIO
 from pathlib import Path
 
@@ -14,7 +13,7 @@ import pandas as pd
 import streamlit as st
 import openpyxl
 
-from rtf_parser import parse_sales_order_rtf
+from erp_db import lookup_orders_by_no, ErpDbError
 from lscr_parser import parse_lscr_excel_wb
 from module_b_invoice import (
     parse_acceptance_excel,
@@ -128,37 +127,33 @@ if "einv_monthly_order" not in st.session_state:
 
 
 # ════════════════════════════════════════════════════════════════
-#  側邊欄：上傳銷貨單
+#  側邊欄：查詢銷貨單（直接查 ERP 資料庫，不用再上傳 RTF）
 # ════════════════════════════════════════════════════════════════
 with st.sidebar:
-    st.header("上傳銷貨單")
-    uploaded_files = st.file_uploader(
-        "選擇 RTF 銷貨單（可多選）",
-        type=["rtf"],
-        accept_multiple_files=True,
+    st.header("查詢銷貨單")
+    order_nos_text = st.text_area(
+        "輸入單據號碼（可多筆，一行一個或用逗號分隔）",
+        height=100,
+        placeholder="202606010004",
     )
 
-    if uploaded_files:
-        if st.button("解析並匯入", type="primary", use_container_width=True):
-            orders, errors = [], []
-            with st.spinner("解析中..."):
-                for uf in uploaded_files:
-                    with tempfile.NamedTemporaryFile(suffix=".rtf", delete=False) as tmp:
-                        tmp.write(uf.read())
-                        tmp_path = tmp.name
-                    try:
-                        data = parse_sales_order_rtf(tmp_path)
-                        data["filename"] = uf.name
-                        orders.append(data)
-                    except Exception as e:
-                        errors.append(f"{uf.name}: {e}")
+    if st.button("查詢並匯入", type="primary", use_container_width=True):
+        order_nos = [x for x in re.split(r"[,\s]+", order_nos_text.strip()) if x]
+        if not order_nos:
+            st.warning("請輸入至少一個單據號碼")
+        else:
+            with st.spinner("查詢中..."):
+                try:
+                    orders, errors = lookup_orders_by_no(order_nos)
+                except ErpDbError as e:
+                    orders, errors = [], [str(e)]
 
             for err in errors:
                 st.error(err)
 
             if orders:
                 st.session_state.parsed_orders = orders
-                st.success(f"解析完成，共 {len(orders)} 張銷貨單")
+                st.success(f"查詢完成，共 {len(orders)} 張銷貨單")
                 st.rerun()
 
     st.divider()
@@ -912,7 +907,7 @@ with tab_label:
                 _selected_nos: list[str] = []
                 if _input_mode == "從已解析銷貨單勾選":
                     if not _order_nos_parsed:
-                        st.info("尚無已解析的銷貨單，請先在左側上傳，或改用「直接輸入銷貨單號」")
+                        st.info("尚無已查詢的銷貨單，請先在左側查詢，或改用「直接輸入銷貨單號」")
                     else:
                         _selected_nos = st.multiselect(
                             "選擇要下載的出貨單",

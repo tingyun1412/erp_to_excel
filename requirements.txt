@@ -4,6 +4,7 @@ pyxlsb>=1.0.10
 xlrd>=2.0.1
 pandas>=2.0.0
 playwright
+pymssql
 PyMuPDF
 Pillow
 filelock>=3.13.0
