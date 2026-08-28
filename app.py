@@ -299,9 +299,9 @@ with tab_label:
                             hide_index=True,
                             height=min(420, 38 * (len(_items) + 1) + 10),
                             column_config={
-                                "料號":     st.column_config.TextColumn(width="large"),
+                                "料號":     st.column_config.TextColumn(width="medium"),
                                 "品名":     st.column_config.TextColumn(width="small"),
-                                "規格":     st.column_config.TextColumn(width="large"),
+                                "規格":     st.column_config.TextColumn(width=550),
                                 "數量":     st.column_config.NumberColumn(width="small"),
                                 "客戶料號": st.column_config.TextColumn(width="medium"),
                                 "批號":     st.column_config.TextColumn(width="medium"),
