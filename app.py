@@ -1134,14 +1134,6 @@ async function copyLabel_{btn_id}(){{
                         },
                     )
 
-                    # 分裝設定
-                    st.markdown("**標籤設定**")
-                    _lscr_c1, _lscr_c2 = st.columns(2)
-                    with _lscr_c1:
-                        _lscr_small = st.checkbox("印小標籤（小包裝數量）", value=True, key="lscr_small")
-                    with _lscr_c2:
-                        _lscr_large = st.checkbox("印大標籤（總出貨數量）", value=True, key="lscr_large")
-
                     if st.button("產出標籤 Excel", type="primary",
                                  use_container_width=True, key="lscr_gen"):
                         with st.spinner("產出中..."):
@@ -1154,8 +1146,6 @@ async function copyLabel_{btn_id}(){{
                                         _lscr_orders,
                                         openpyxl.load_workbook(BytesIO(_tmpl_bytes)),
                                         _lscr_tmpl_info,
-                                        include_small=_lscr_small,
-                                        include_large=_lscr_large,
                                         tmpl_bytes=_tmpl_bytes,
                                     )
                                     st.download_button(

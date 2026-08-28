@@ -1378,13 +1378,14 @@ def _inject_lscr_drawing(
     tmpl_bytes: bytes,
     n_items: int,
     unit_rows: int,
-    large_col_offset: int,
+    slot2_col_offset: int,
     tmpl_sheet_name: str = "lable",
 ) -> BytesIO:
     """
     ZIP-level drawing injection for LSCR output.
-    For each of n_items label rows, duplicates template drawing anchors
-    with the appropriate row offset and (for the large slot) col offset.
+    Each label row prints two identical small-label copies (slot 1 at
+    col offset 0, slot 2 at col offset slot2_col_offset); this duplicates
+    the template's logo/image anchors into both copies for every item.
     """
     import zipfile
     import io as _io
@@ -1529,10 +1530,10 @@ def _inject_lscr_drawing(
                 row_off = item_idx * unit_rows
                 for a_xml, fr, fc in label_anchors:
                     new_anchor_parts.append(_shift_anchor(a_xml, row_off))
-                if large_col_offset > 0:
+                if slot2_col_offset > 0:
                     for a_xml, fr, fc in label_anchors:
                         if fc == 0:
-                            new_anchor_parts.append(_shift_anchor(a_xml, row_off, large_col_offset))
+                            new_anchor_parts.append(_shift_anchor(a_xml, row_off, slot2_col_offset))
 
             # ── build new drawing XML ─────────────────────────────────
             ns_m = _re.match(r'(<\?xml[^>]*\?>)?\s*(<xdr:wsDr[^>]*>)', drawing_xml, _re.DOTALL)
@@ -1607,15 +1608,15 @@ def write_lscr_labels(
     orders: list[dict],
     wb_tmpl,
     tmpl_info: dict,
-    include_small: bool = True,
-    include_large: bool = True,
     tmpl_bytes: bytes = None,
 ) -> BytesIO:
     """
     LSCR 專用排版（TSC TTP-246M Plus）：
-      每個品項一列：[小標1 col A][小標2 col C][大標 col E]
-      列印時自行選範圍：小標 A:C，大標 E:E
-      欄寬：A=C=E=22.8，B=D=2.45
+      每個品項一列，印兩張一樣的小標籤：[小標1 col A][小標2 col C]
+      （不再有「大標籤/裝箱」欄位——之前依「一箱/多箱」自動切換大小標籤的邏輯，
+      在「只需一箱」的品項上會忽略使用者關掉大標籤的設定，導致有些品項印大標、
+      有些沒印，行為不一致；乾脆整個拿掉，永遠只印小包裝數量的兩張標籤）
+      欄寬：A=C=22.8，B=2.45
       列高：第1列=15pt，第2–8列=14.2pt
     """
     ws_tmpl = wb_tmpl["lable"]
@@ -1633,12 +1634,10 @@ def write_lscr_labels(
     ws_out.title = "Labels"
 
     # 固定欄寬（符合 TSC TTP-246M Plus 標籤機設定，見模組頂部 _LABEL_* 常數）
-    # A=小標1, B=間距, C=小標2, D=間距, E=大標
+    # A=小標1, B=間距, C=小標2
     ws_out.column_dimensions["A"].width = _LABEL_COL_WIDTH
-    ws_out.column_dimensions["B"].width = 4  # 小標1/小標2 之間的間距，跟 D 欄不同寬
+    ws_out.column_dimensions["B"].width = 4  # 小標1/小標2 之間的間距
     ws_out.column_dimensions["C"].width = _LABEL_COL_WIDTH
-    ws_out.column_dimensions["D"].width = _LABEL_GAP_WIDTH
-    ws_out.column_dimensions["E"].width = _LABEL_COL_WIDTH
 
     unit_merges = [
         m for m in ws_tmpl.merged_cells.ranges
@@ -1685,10 +1684,7 @@ def write_lscr_labels(
         for phys_item in order.get("items", []):
             total   = float(phys_item.get("_total_qty") or phys_item.get("quantity") or 0)
             small_q = float(phys_item.get("_small_qty") or total)
-            large_q = float(phys_item.get("_large_qty") or total)
             small_u = phys_item.get("_small_unit", "PCS")
-            large_u = phys_item.get("_large_unit", "PCS")
-            one_box = (small_q >= total or total == 0)
 
             # 固定列高（TSC TTP-246M Plus 設定）
             # 8列總高 14.8+7×14.0=112.8pt=39.8mm，留 0.2mm 緩衝不超出 40mm 標籤
@@ -1696,31 +1692,18 @@ def write_lscr_labels(
             for r_off in range(1, unit_rows):
                 ws_out.row_dimensions[current_row + r_off].height = _LABEL_OTHER_ROW_HEIGHT
 
-            if one_box:
-                if include_small or include_large:
-                    _write_slot(dict(phys_item), order, global_seq, 0, current_row)
-                    _write_slot(dict(phys_item), order, global_seq, 1, current_row)
-                    _write_slot(dict(phys_item), order, global_seq, 2, current_row)
-            else:
-                # 左欄（A）：小標籤 1
-                if include_small:
-                    s = dict(phys_item)
-                    s["quantity"] = str(int(small_q))
-                    s["unit"]     = small_u
-                    _write_slot(s, order, global_seq, 0, current_row)
-                    _write_slot(s, order, global_seq, 1, current_row)
-                # 右欄（E）：大標籤
-                if include_large:
-                    l = dict(phys_item)
-                    l["quantity"] = str(int(large_q))
-                    l["unit"]     = large_u
-                    _write_slot(l, order, global_seq, 2, current_row)
+            # 永遠印兩張一樣的小標籤（小包裝數量，沒填的話退回用總數量）
+            s = dict(phys_item)
+            s["quantity"] = str(int(small_q))
+            s["unit"]     = small_u
+            _write_slot(s, order, global_seq, 0, current_row)
+            _write_slot(s, order, global_seq, 1, current_row)
 
             # Logo：tmpl_bytes 提供時改用 ZIP 注入；否則用 openpyxl API
             if not tmpl_bytes:
                 _copy_passthrough_images(ws_out, ws_tmpl, unit_rows, current_row)
                 _copy_passthrough_images(ws_out, ws_tmpl, unit_rows, current_row,
-                                         col_offset=2 * unit_width, only_cols={0})
+                                         col_offset=unit_width, only_cols={0})
 
             current_row += unit_rows  # 不加空白分隔列，每頁剛好 8 列
             global_seq  += 1
@@ -1755,7 +1738,7 @@ def write_lscr_labels(
             buf, tmpl_bytes,
             n_items=n_items,
             unit_rows=unit_rows,
-            large_col_offset=2 * unit_width,
+            slot2_col_offset=unit_width,
         )
 
     return buf

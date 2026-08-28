@@ -122,49 +122,6 @@ def parse_lscr_excel_wb(wb: openpyxl.Workbook) -> list[dict]:
     return list(orders_map.values())
 
 
-def expand_lscr_items(orders: list[dict],
-                      include_small: bool = True,
-                      include_large: bool = True) -> list[dict]:
-    """
-    依大/小包裝展開品項：
-    - include_small: 固定產生 2 張小包裝標籤（每張 = 小包裝數量）
-    - include_large: 產生 1 張大包裝標籤（= 大包裝/總出貨數量）
-    若大小包裝數量相同（只有一箱），只印一張。
-    """
-    result = []
-    for o in orders:
-        new_o = dict(o)
-        new_items = []
-        for itm in o.get("items", []):
-            total = float(itm.get("_total_qty") or itm.get("quantity") or 0)
-            small = float(itm.get("_small_qty") or total)
-            large = float(itm.get("_large_qty") or total)
-            large_unit = itm.get("_large_unit") or itm.get("unit") or "PCS"
-            small_unit = itm.get("_small_unit") or itm.get("unit") or "PCS"
-
-            one_box = (small >= total or total == 0)
-
-            if one_box:
-                # 只有一箱，印一張
-                new_items.append(dict(itm))
-            else:
-                if include_small and small > 0:
-                    for _ in range(2):  # 固定 2 張小包裝
-                        s = dict(itm)
-                        s["quantity"] = str(int(small))
-                        s["unit"] = small_unit
-                        new_items.append(s)
-                if include_large:
-                    l = dict(itm)
-                    l["quantity"] = str(int(large))
-                    l["unit"] = large_unit
-                    new_items.append(l)
-
-        new_o["items"] = new_items
-        result.append(new_o)
-    return result
-
-
 def parse_lscr_excel(path: str) -> list[dict]:
     wb = openpyxl.load_workbook(path, data_only=True)
     return parse_lscr_excel_wb(wb)
