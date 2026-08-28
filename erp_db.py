@@ -106,6 +106,31 @@ def _blank_item(seq, ship_date, customer):
     }
 
 
+def _fetch_item_name(cursor, item_no: str, fallback_raw: str) -> tuple[str, str]:
+    """
+    查品保/驗收紀錄表 WD4INVNA 取得該料號比較可靠的品名/規格文字，
+    用來取代銷貨單明細（WD4DT10A.DT10008）裡業務手動輸入、偶爾會漏字的版本
+    （例如「二階」打成「二」）。取最新一筆，優先用 INVN006，沒有值才用 INVN005；
+    這張表完全查不到這個料號時，才退回用銷貨單明細自己的文字。
+    回傳 (name, description)，用開頭連續中文字跟其餘部分切開。
+    """
+    raw = fallback_raw
+    if item_no:
+        try:
+            cursor.execute(
+                "SELECT TOP 1 INVN005, INVN006 FROM WD4INVNA "
+                "WHERE INVN002 = %s ORDER BY INVN055 DESC",
+                (item_no,),
+            )
+            row = cursor.fetchone()
+            if row:
+                invn005, invn006 = row
+                raw = (invn006 or "").strip() or (invn005 or "").strip() or fallback_raw
+        except Exception:
+            pass  # 查不到就安靜退回用原本的文字，不擋整筆訂單
+    return _split_cjk_prefix((raw or "").strip())
+
+
 def _fetch_customer(cursor, customer_code: str) -> dict:
     """查客戶主檔，查不到就回傳全空字典（不擋單據本身的查詢結果）。"""
     if not customer_code:
@@ -189,7 +214,7 @@ def lookup_order_by_no(order_no: str) -> dict:
             item["remark"]     = (remark or "").strip()
             item["lot_no"]     = (lot_no or "").strip()
 
-            name_cjk, rest = _split_cjk_prefix((name_raw or "").strip())
+            name_cjk, rest = _fetch_item_name(cursor, item["item_no"], name_raw)
             item["name"]        = name_cjk
             item["description"] = rest.strip()
 
