@@ -119,6 +119,14 @@ def _screenshot_labels(username: str, password: str, doc_uid: str, sele_num: str
         # 頁面 onload 會自動彈 window.print()（無頭模式下不會真的印，但穩妥起見擋掉）
         page.evaluate("window.print = function(){}")
 
+        # 這個頁面完全沒指定字體，靠瀏覽器預設值（一般桌面瀏覽器預設是細明體/
+        # Times New Roman 這種襯線字體）。無頭瀏覽器的預設字體設定不一定跟平常
+        # 用的瀏覽器一樣，字寬不同會讓換行點跟著跑掉，所以這裡強制套用同一種
+        # 字體，確保截圖版面跟人工操作看到的一致。
+        page.add_style_tag(content="""
+            body, table, td, th { font-family: "Times New Roman", "PMingLiU", serif !important; }
+        """)
+
         tables = page.locator("table.lable")
         count = tables.count()
         shots = [tables.nth(i).screenshot() for i in range(count)]
