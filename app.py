@@ -951,9 +951,10 @@ with tab_label:
 
                             def _pdf_to_paired_b64_list(pdf_bytes: bytes, dpi: int = 150, group_size: int = 2) -> list[tuple[str, int, int]]:
                                 """
-                                把 PDF 每一頁轉成圖片，每 group_size 張（預設 2 張）垂直合併成一張
-                                PNG——標籤很多張時（例如 50 張）分成一組一組貼，而不是全部疊成
-                                一張超長圖片貼不動。回傳 [(base64, 起始頁, 結束頁), ...]（頁碼從1起算）。
+                                把 PDF 每一頁轉成圖片，每 group_size 張（預設 2 張）左右並排合併成
+                                一張 PNG（第一張在左、第二張在右）——標籤很多張時（例如 50 張）
+                                分成一組一組貼，而不是全部疊成一張超長圖片貼不動。
+                                回傳 [(base64, 起始頁, 結束頁), ...]（頁碼從1起算）。
                                 """
                                 import fitz as _fitz
                                 import base64 as _b64
@@ -966,13 +967,14 @@ with tab_label:
                                 _out = []
                                 for _gi in range(0, len(_imgs), group_size):
                                     _grp = _imgs[_gi:_gi + group_size]
-                                    _w = max(im.width for im in _grp)
-                                    _h = sum(im.height for im in _grp)
+                                    # 左右並排（第一張在左、第二張在右），不是上下疊
+                                    _w = sum(im.width for im in _grp)
+                                    _h = max(im.height for im in _grp)
                                     _combined = _PILImage.new("RGB", (_w, _h), "white")
-                                    _y = 0
+                                    _x = 0
                                     for im in _grp:
-                                        _combined.paste(im, (0, _y))
-                                        _y += im.height
+                                        _combined.paste(im, (_x, 0))
+                                        _x += im.width
                                     _buf = BytesIO()
                                     _combined.save(_buf, format="PNG")
                                     _out.append((_b64.b64encode(_buf.getvalue()).decode(),
