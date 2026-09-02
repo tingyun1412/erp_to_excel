@@ -108,7 +108,12 @@ def _screenshot_labels(username: str, password: str, doc_uid: str, sele_num: str
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
-        ctx = browser.new_context(http_credentials={"username": username, "password": password})
+        # device_scale_factor 調高：等於用高解析度螢幕截圖，QR Code／文字
+        # 才不會糊（預設 1 等於一般螢幕解析度，截出來的圖偏小張、放大會糊）。
+        ctx = browser.new_context(
+            http_credentials={"username": username, "password": password},
+            device_scale_factor=3,
+        )
         page = ctx.new_page()
         page.goto(url, timeout=30_000, wait_until="networkidle")
         # 頁面 onload 會自動彈 window.print()（無頭模式下不會真的印，但穩妥起見擋掉）

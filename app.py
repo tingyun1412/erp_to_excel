@@ -995,8 +995,6 @@ with tab_label:
                                 _n = len(groups)
                                 _first_rng = _range_list[0]
                                 return f"""
-<img id="prev_{btn_id}" src="data:image/png;base64,{_b64_list[0]}"
-     style="max-width:100%;border:1px solid #ccc;border-radius:4px;margin-bottom:8px">
 <button id="{btn_id}" onclick="copyNext_{btn_id}()" style="
     background:#0068c9;color:white;border:none;border-radius:6px;
     padding:8px 0;font-size:15px;cursor:pointer;width:100%">
@@ -1004,6 +1002,9 @@ with tab_label:
 </button>
 <div id="toast_{btn_id}" style="display:none;margin-top:6px;padding:8px;
     background:#21c354;color:white;border-radius:6px;text-align:center;font-size:14px">
+</div>
+<div style="max-height:280px;overflow-y:auto;margin-top:8px;border:1px solid #ccc;border-radius:4px">
+<img id="prev_{btn_id}" src="data:image/png;base64,{_b64_list[0]}" style="width:100%;display:block">
 </div>
 <script>
 const imgs_{btn_id} = {_json.dumps(_b64_list)};
@@ -1059,7 +1060,8 @@ async function copyNext_{btn_id}(){{
                                     _bid = f"cp_{_mno.replace('-', '_')}"
                                     st.components.v1.html(
                                         _cycling_copy_html(_groups, _mno, _bid),
-                                        height=420,
+                                        height=380,
+                                        scrolling=True,
                                     )
 
                             if _failed:
