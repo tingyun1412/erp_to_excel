@@ -176,7 +176,8 @@ def close_login_browser(pid: int):
 def _fill_item_row(page, index: int, item: dict, customer_order_no: str):
     """
     填第 index 項（0 起算）的品項欄位。index > 0 前要先按「新增項次」。
-    相關號碼一＝客戶訂單號碼，相關號碼二＝客戶料號（不是我們自己的銷貨單號／料號）。
+    品名1＝品名+規格合併，品名2＝客戶料號（備註）；
+    相關號碼一＝客戶訂單號碼，相關號碼二不填。
     """
     if index > 0:
         page.click(ADD_ITEM_SELECTOR)
@@ -184,6 +185,7 @@ def _fill_item_row(page, index: int, item: dict, customer_order_no: str):
 
     name = (item.get("name") or "").strip()
     spec = (item.get("description") or "").strip()
+    name_and_spec = (name + spec).strip() or item.get("item_no", "")
     unit = (item.get("unit") or "PCS").strip()
     qty = item.get("quantity", 0) or 0
     price = item.get("unit_price", 0) or 0
@@ -191,16 +193,14 @@ def _fill_item_row(page, index: int, item: dict, customer_order_no: str):
     # 品項自己有指定的話優先用品項的（例如月結彙總發票，每個品項來自不同出貨單號）
     item_customer_order_no = (item.get("customer_order_no") or customer_order_no or "").strip()
 
-    page.fill(f'input[name="dc_mtnm_1_{index}"]', name or item.get("item_no", ""))
-    if spec:
-        page.fill(f'input[name="dc_dsr2_1_{index}"]', spec)
+    page.fill(f'input[name="dc_mtnm_1_{index}"]', name_and_spec)
+    if customer_part_no:
+        page.fill(f'input[name="dc_dsr2_1_{index}"]', customer_part_no)
     page.fill(f'input[name="dc_un1_1_{index}"]', unit)
     page.fill(f'input[name="dc_up_1_{index}"]', str(price))
     page.fill(f'input[name="dc_qty1_1_{index}"]', str(qty))
     if item_customer_order_no:
         page.fill(f'input[name="dc_relno1_1_{index}"]', item_customer_order_no)
-    if customer_part_no:
-        page.fill(f'input[name="dc_relno2_1_{index}"]', customer_part_no)
 
 
 def fill_one_order(page, order: dict, dry_run: bool = True) -> dict:
