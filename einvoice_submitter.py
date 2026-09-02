@@ -67,6 +67,29 @@ def resolve_member_type(customer_name: str) -> str:
     return "general"
 
 
+def _active_page(ctx):
+    """
+    從 context 現有的分頁裡選出目前該操作的那一個：優先挑「不在登入頁」的
+    分頁（網址不是 mgt_logon.jsp 且畫面上沒有密碼欄位）——e-invoice.com.tw
+    登入成功後有時會另外開一個新分頁承接後續內容，舊的登入分頁不會自動關掉，
+    所以不能直接用第一個分頁。較晚開的分頁通常才是登入後的正確分頁，所以
+    從後往前找。都不符合就回傳 None（呼叫端自行決定要不要重試），絕對不會
+    在這裡另外生一個新分頁出來，避免分頁越開越多。
+    """
+    pages = ctx.pages
+    if not pages:
+        return None
+    for page in reversed(pages):
+        try:
+            on_login_url = "mgt_logon.jsp" in page.url
+            has_password_field = page.locator('input[type="password"]').count() > 0
+        except Exception:
+            continue
+        if not (on_login_url or has_password_field):
+            return page
+    return None
+
+
 def launch_login_browser() -> dict:
     """
     開一個有畫面的 Chromium，導到登入頁，並自動把帳號密碼填好——
@@ -104,40 +127,27 @@ def launch_login_browser() -> dict:
             with sync_playwright() as pw:
                 browser = pw.chromium.connect_over_cdp(f"http://localhost:{port}", timeout=2_000)
                 ctx = browser.contexts[0]
-                page = ctx.pages[0] if ctx.pages else ctx.new_page()
-                if page.locator("#inputAcno").count() > 0:
+                page = ctx.pages[0] if ctx.pages else None
+                if page is not None and page.locator("#inputAcno").count() > 0:
                     page.fill("#inputAcno", LOGIN_ACCOUNT)
                     page.fill("#inputPswd", LOGIN_PASSWORD)
-            break
+            if page is not None:
+                break
         except Exception:
-            time.sleep(0.5)
+            pass
+        time.sleep(0.5)
 
     return {"port": port, "pid": proc.pid}
 
 
 def is_login_alive(port: int) -> bool:
-    """
-    試連 CDP，確認瀏覽器還在且已登入（不在登入頁）。
-    登入成功後有些情況會另外彈出/切換到新分頁，舊分頁不會消失，
-    所以不能只檢查第一個分頁——這裡改成只要「任何一個分頁」看起來已經
-    離開登入頁，就視為登入成功。判斷同時看網址（是否還在 mgt_logon.jsp）
-    跟頁面上還有沒有密碼欄位，兩個都命中「還在登入頁」才算沒登入。
-    """
+    """試連 CDP，確認瀏覽器還在且已登入（不在登入頁）。"""
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as pw:
             browser = pw.chromium.connect_over_cdp(f"http://localhost:{port}", timeout=5_000)
             ctx = browser.contexts[0]
-            pages = ctx.pages or [ctx.new_page()]
-            for page in pages:
-                try:
-                    on_login_url = "mgt_logon.jsp" in page.url
-                    has_password_field = page.locator('input[type="password"]').count() > 0
-                except Exception:
-                    continue
-                if not (on_login_url or has_password_field):
-                    return True
-            return False
+            return _active_page(ctx) is not None
     except Exception:
         return False
 
@@ -287,7 +297,9 @@ def _with_page(port: int, fn):
     with sync_playwright() as pw:
         browser = pw.chromium.connect_over_cdp(f"http://localhost:{port}")
         ctx = browser.contexts[0]
-        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        page = _active_page(ctx)
+        if page is None:
+            raise RuntimeError("找不到已登入的分頁，請重新登入")
         return fn(page)
     # 注意：這裡刻意不呼叫 browser.close()——瀏覽器是外部登入用的 subprocess，
     # 只是連線斷開，瀏覽器本身留著給下一次操作用，避免每次都要重新登入過驗證碼。
@@ -319,7 +331,9 @@ def dry_run_batch(port: int, orders: list[dict], on_progress=None) -> list[dict]
     with sync_playwright() as pw:
         browser = pw.chromium.connect_over_cdp(f"http://localhost:{port}")
         ctx = browser.contexts[0]
-        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        page = _active_page(ctx)
+        if page is None:
+            raise RuntimeError("找不到已登入的分頁，請重新登入")
 
         for i, order in enumerate(orders):
             try:
