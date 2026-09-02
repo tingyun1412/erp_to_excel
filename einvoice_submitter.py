@@ -156,7 +156,13 @@ def close_login_browser(pid: int):
     """盡力關閉登入用的瀏覽器 process，失敗就吞掉。"""
     try:
         if sys.platform == "win32":
-            subprocess.run(["taskkill", "/PID", str(pid), "/F", "/T"], capture_output=True)
+            # 這支 App 是用 pythonw.exe 跑（沒有主控台），taskkill.exe 預設還是會
+            # 自己彈一個主控台視窗閃一下；加 CREATE_NO_WINDOW 讓它安靜執行。
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/F", "/T"],
+                capture_output=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
         else:
             import os
             import signal
