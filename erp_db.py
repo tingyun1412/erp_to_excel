@@ -106,12 +106,24 @@ def _blank_item(seq, ship_date, customer):
     }
 
 
+def _looks_like_spec(text: str) -> bool:
+    """
+    粗略判斷一段文字像不像真正的品名規格：含 = 這種尺寸標記，
+    且不是用「、」條列一堆客戶名稱的備註格式。
+    WD4INVNA 有些記錄其實是「共用模具」的客戶清單備註（例如
+    「鼎元、聯勝、光鋐;模具ID=0.12*OD=0.28mm」），不是這張訂單這個
+    品項真正的品名規格，要濾掉避免誤用比銷貨單明細本身還離譜。
+    """
+    return bool(text) and "=" in text and "、" not in text
+
+
 def _fetch_item_name(cursor, item_no: str, fallback_raw: str) -> tuple[str, str]:
     """
     查品保/驗收紀錄表 WD4INVNA 取得該料號比較可靠的品名/規格文字，
     用來取代銷貨單明細（WD4DT10A.DT10008）裡業務手動輸入、偶爾會漏字的版本
-    （例如「二階」打成「二」）。取最新一筆，優先用 INVN006，沒有值才用 INVN005；
-    這張表完全查不到這個料號時，才退回用銷貨單明細自己的文字。
+    （例如「二階」打成「二」）。取最新一筆，優先用 INVN006，看起來不像
+    規格就改用 INVN005，兩個都不像規格（或這張表查不到這個料號）就
+    退回用銷貨單明細自己的文字，不會硬套一個看起來就不對的值。
     回傳 (name, description)，用開頭連續中文字跟其餘部分切開。
     """
     raw = fallback_raw
@@ -124,8 +136,12 @@ def _fetch_item_name(cursor, item_no: str, fallback_raw: str) -> tuple[str, str]
             )
             row = cursor.fetchone()
             if row:
-                invn005, invn006 = row
-                raw = (invn006 or "").strip() or (invn005 or "").strip() or fallback_raw
+                invn005 = (row[0] or "").strip()
+                invn006 = (row[1] or "").strip()
+                if _looks_like_spec(invn006):
+                    raw = invn006
+                elif _looks_like_spec(invn005):
+                    raw = invn005
         except Exception:
             pass  # 查不到就安靜退回用原本的文字，不擋整筆訂單
     return _split_cjk_prefix((raw or "").strip())
