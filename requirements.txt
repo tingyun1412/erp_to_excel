@@ -5,6 +5,7 @@ xlrd>=2.0.1
 pandas>=2.0.0
 playwright
 pymssql
+requests
 PyMuPDF
 Pillow
 filelock>=3.13.0

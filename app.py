@@ -814,7 +814,13 @@ with tab_label:
         _BUILTIN_VENDORS = [
             {"公司名稱": "鴻勁", "網址": "http://scm.honprec.com/hp/Index.aspx",
              "帳號": "BR026", "密碼": "5403"},
+            {"公司名稱": "均華(GMM)", "網址": "http://SLP.gmmcorp.com.tw:8080/apps/lg_001.nsf",
+             "帳號": "110488", "密碼": "4667044110488"},
         ]
+        # 廠商名稱 → 下載模組（不同廠商網站架構差很多，各自一支模組）
+        _VENDOR_DOWNLOADER = {
+            "均華(GMM)": "slp_downloader",
+        }
 
         try:
             _custom_vendors = load_vendors()
@@ -930,7 +936,11 @@ with tab_label:
                                                use_container_width=True, key="erp_download_btn"):
                     with st.spinner("連線 ERP 並下載中，請稍候..."):
                         try:
-                            from erp_downloader import download_label_pdfs, pack_zip
+                            import importlib
+                            _dl_module_name = _VENDOR_DOWNLOADER.get(_sel_v, "erp_downloader")
+                            _dl_module = importlib.import_module(_dl_module_name)
+                            download_label_pdfs = _dl_module.download_label_pdfs
+                            pack_zip = _dl_module.pack_zip
                             _results, _erp_errors = download_label_pdfs(
                                 _selected_nos,
                                 _vrec.get("帳號", ""),
