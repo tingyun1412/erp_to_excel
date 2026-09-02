@@ -1,12 +1,15 @@
 """
 均華(GMM)供應商作業平台 — 出貨標籤下載
 登入 http://SLP.gmmcorp.com.tw:8080/apps/lg_001.nsf，依出貨單號抓取標籤資料，
-自己重新畫成標籤圖片（含 QR Code），組成 PDF，跟 erp_downloader.download_label_pdfs()
-用同樣的 {order_no: pdf_bytes} 回傳格式，直接接上 app.py 現有的「複製截圖」流程
-（PDF 每頁轉一張圖、垂直合併、按鈕一鍵複製到剪貼簿貼進 BarTender 之類的標籤軟體）。
+直接截取均華網站原本的畫面（保留原本的顏色/框線/字型，不重畫），組成 PDF，
+跟 erp_downloader.download_label_pdfs() 用同樣的 {order_no: pdf_bytes} 回傳
+格式，接上 app.py 現有的「複製截圖」流程（PDF 每頁轉一張圖、垂直合併、
+按鈕一鍵複製到剪貼簿貼進 BarTender 之類的標籤軟體）。
 
 這個網站是 Lotus Domino 應用程式，用 HTTP Basic Auth 保護在資料庫層級
-（不是表單登入），純用 requests 就能把整個流程走完，不需要瀏覽器/Playwright。
+（不是表單登入）。找出貨單號對應文件的過程純用 requests（快、不用開瀏覽器）；
+只有最後「擷取標籤畫面」這一步才用 Playwright 開真的瀏覽器，直接對均華
+網站算圖後的結果截圖，畫面跟人工操作看到的一模一樣，不是重新畫的版本。
 
 流程（對應人工操作的每一步）：
   1. 「出貨-依建立日」列表（FVEWFV02）— 依出貨單號找到文件 UID。
@@ -15,31 +18,33 @@
      找得到；找不到才跟著「下一頁」按鈕用的 Domino Click token 翻頁。
   2. 開啟該筆文件（EditDocument）— 取得 SeleNum（預設全選的標籤序號清單）。
   3. 呼叫「列印選取標籤(標籤機)」按鈕實際打的網址（RunAgent，
-     Function=PrtSele2DBarcode4Supplier）— 拿到乾淨的標籤 HTML，每張標籤
-     是一個 <table class='lable'>，內含料號/Project/數量/PO/標籤序號(BCode#)/
-     品名規格，以及一個指向 QR Code 圖片 servlet 的 <iframe src>。
-  4. 把每張標籤重新畫成一張圖片（文字用 Pillow 畫，QR Code 直接下載原圖貼上，
-     兩者內容完全一致，不是重新產生的假 QR），組成一份 PDF。
+     Function=PrtSele2DBarcode4Supplier）— 用 Playwright 開啟這個網址，
+     對每一張標籤（<table class='lable'>）個別截圖，裁切精準，畫面跟均華
+     網站本身完全一致。
 """
-import html
 import io
 import re
+import subprocess
+import sys
 import zipfile
+from pathlib import Path
 
 import requests
-from PIL import Image, ImageDraw, ImageFont
 
 BASE = "http://SLP.gmmcorp.com.tw:8080/apps/lg_001.nsf"
 VIEW_URL = f"{BASE}/FVEWFV02?OpenForm"
 
-_FONT_PATH = r"C:\Windows\Fonts\msjh.ttc"  # 微軟正黑體，Windows 內建
 
-
-def _font(size: int):
-    try:
-        return ImageFont.truetype(_FONT_PATH, size)
-    except Exception:
-        return ImageFont.load_default()
+def _ensure_chromium_installed():
+    """惰性安裝 Chromium：只有真的要用這個下載功能時才檢查/安裝。"""
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as pw:
+        exe = Path(pw.chromium.executable_path)
+    if not exe.exists():
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            check=True,
+        )
 
 
 def _get(session: requests.Session, url: str, **kw) -> requests.Response:
@@ -87,75 +92,32 @@ def _get_sele_num(session: requests.Session, doc_uid: str) -> str:
     return m.group(1) if m else ""
 
 
-def _fetch_labels(session: requests.Session, doc_uid: str, sele_num: str) -> list[dict]:
-    """呼叫「列印選取標籤(標籤機)」實際打的網址，解析出每一張標籤的資料。"""
+def _screenshot_labels(username: str, password: str, doc_uid: str, sele_num: str) -> list[bytes]:
+    """
+    用 Playwright 開啟「列印選取標籤(標籤機)」實際打的網址，對每一張標籤
+    （<table class='lable'>）個別截圖，回傳 PNG bytes 的清單，畫面跟均華
+    網站本身完全一致（顏色/框線/字型都不變），不是重新畫的版本。
+    """
+    _ensure_chromium_installed()
+    from playwright.sync_api import sync_playwright
+
     url = (f"{BASE}/RunAgent?OpenAgent&Function=PrtSele2DBarcode4Supplier"
            f"&ParentUNID={doc_uid}&SeleNum={sele_num}")
-    page_html = _get(session, url, timeout=30).text
 
-    labels = []
-    for block in re.findall(r"<table class='lable'.*?</table>", page_html, re.DOTALL):
-        def _grab(pat, default=""):
-            m = re.search(pat, block, re.DOTALL)
-            return html.unescape(m.group(1).strip()) if m else default
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        ctx = browser.new_context(http_credentials={"username": username, "password": password})
+        page = ctx.new_page()
+        page.goto(url, timeout=30_000, wait_until="networkidle")
+        # 頁面 onload 會自動彈 window.print()（無頭模式下不會真的印，但穩妥起見擋掉）
+        page.evaluate("window.print = function(){}")
 
-        qr_m = re.search(r"src='([^']+QRCode[^']+)'", block)
-        qr_url = qr_m.group(1) if qr_m else ""
-        if qr_url and not qr_url.startswith("http"):
-            qr_url = "http://SLP.gmmcorp.com.tw:8080" + qr_url
+        tables = page.locator("table.lable")
+        count = tables.count()
+        shots = [tables.nth(i).screenshot() for i in range(count)]
 
-        labels.append({
-            "item":     _grab(r"Item\s*:\s*([^<]+)</td>"),
-            "project":  _grab(r"Project\s*:\s*([^<]+)</td>"),
-            "qty_line": _grab(r"Qty\s*:\s*([^<]+)</td>"),
-            "bcode":    _grab(r"BCode#\s*:\s*([^<]+)<br>"),
-            "dates":    _grab(r"BCode#[^<]*<br>([^<]+)<br>"),
-            "desc":     _grab(r"Desc\s*:\s*([^<]+)</td>"),
-            "qr_url":   qr_url,
-        })
-    return labels
-
-
-def _render_label(session: requests.Session, label: dict) -> Image.Image:
-    """把一張標籤的文字資料＋QR Code 畫成一張乾淨的圖片（貼進 BarTender 用）。"""
-    W, H = 900, 420
-    img = Image.new("RGB", (W, H), "white")
-    draw = ImageDraw.Draw(img)
-
-    pad = 22
-    f_normal = _font(30)
-    f_small = _font(24)
-    qr_size = 220
-
-    lines = [
-        (f"料號：{label['item']}", f_normal),
-        (f"Project：{label['project']}", f_small),
-        (label["qty_line"], f_small),
-        (f"標籤序號：{label['bcode']}", f_small),
-        (label["dates"], f_small),
-    ]
-    y = pad
-    for text, font in lines:
-        draw.text((pad, y), text, fill="black", font=font)
-        y += font.size + 10
-
-    desc = label.get("desc", "")
-    if desc:
-        y += 8
-        max_chars = 22
-        for i in range(0, len(desc), max_chars):
-            draw.text((pad, y), desc[i:i + max_chars], fill="black", font=f_small)
-            y += f_small.size + 6
-
-    if label["qr_url"]:
-        try:
-            qr_img = Image.open(io.BytesIO(_get(session, label["qr_url"], timeout=15).content))
-            qr_img = qr_img.convert("RGB").resize((qr_size, qr_size))
-            img.paste(qr_img, (W - qr_size - pad, pad))
-        except Exception:
-            pass  # QR 抓不到就留白，不擋整張標籤的其他文字
-
-    return img
+        browser.close()
+    return shots
 
 
 def download_label_pdfs(
@@ -164,13 +126,15 @@ def download_label_pdfs(
     password: str = "4667044110488",
 ) -> tuple[dict, dict]:
     """
-    登入均華供應商平台，依出貨單號抓取標籤資料並重新畫成 PDF（每張標籤一頁）。
-    回傳 (results, errors)：
+    登入均華供應商平台，依出貨單號抓取標籤，直接截取原始畫面組成 PDF
+    （每張標籤一頁）。回傳 (results, errors)：
       results: {order_no: pdf_bytes | None}
       errors:  {order_no: error_str}
     格式跟 erp_downloader.download_label_pdfs 一致，可以直接沿用 app.py
     既有的「複製截圖」／打包 zip 流程，呼叫端不用另外寫一套。
     """
+    from PIL import Image
+
     results = {no: None for no in order_nos}
     errors: dict = {}
 
@@ -186,11 +150,11 @@ def download_label_pdfs(
                     "（可能太舊、翻頁翻不到，或單號打錯）"
                 )
             sele_num = _get_sele_num(session, doc_uid)
-            labels = _fetch_labels(session, doc_uid, sele_num)
-            if not labels:
+            shots = _screenshot_labels(username, password, doc_uid, sele_num)
+            if not shots:
                 raise RuntimeError("查得到這張出貨單，但解析不到任何標籤內容")
 
-            imgs = [_render_label(session, lb) for lb in labels]
+            imgs = [Image.open(io.BytesIO(s)).convert("RGB") for s in shots]
             buf = io.BytesIO()
             imgs[0].save(buf, format="PDF", save_all=True, append_images=imgs[1:])
             results[order_no] = buf.getvalue()
