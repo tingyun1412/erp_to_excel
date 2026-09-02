@@ -116,15 +116,28 @@ def launch_login_browser() -> dict:
 
 
 def is_login_alive(port: int) -> bool:
-    """試連 CDP，確認瀏覽器還在且已登入（不在登入頁）。"""
+    """
+    試連 CDP，確認瀏覽器還在且已登入（不在登入頁）。
+    登入成功後有些情況會另外彈出/切換到新分頁，舊分頁不會消失，
+    所以不能只檢查第一個分頁——這裡改成只要「任何一個分頁」看起來已經
+    離開登入頁，就視為登入成功。判斷同時看網址（是否還在 mgt_logon.jsp）
+    跟頁面上還有沒有密碼欄位，兩個都命中「還在登入頁」才算沒登入。
+    """
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as pw:
             browser = pw.chromium.connect_over_cdp(f"http://localhost:{port}", timeout=5_000)
             ctx = browser.contexts[0]
-            page = ctx.pages[0] if ctx.pages else ctx.new_page()
-            still_login_page = page.locator('input[type="password"]').count() > 0
-            return not still_login_page
+            pages = ctx.pages or [ctx.new_page()]
+            for page in pages:
+                try:
+                    on_login_url = "mgt_logon.jsp" in page.url
+                    has_password_field = page.locator('input[type="password"]').count() > 0
+                except Exception:
+                    continue
+                if not (on_login_url or has_password_field):
+                    return True
+            return False
     except Exception:
         return False
 
