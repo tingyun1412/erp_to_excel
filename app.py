@@ -979,30 +979,52 @@ with tab_label:
                                                  _gi + 1, _gi + len(_grp)))
                                 return _out
 
-                            def _copy_button_html(b64: str, btn_id: str, label: str) -> str:
+                            def _cycling_copy_html(groups: list, order_no: str, btn_id: str) -> str:
+                                """
+                                一組品項的所有「配對圖片」放進同一個元件：一個按鈕，每按一次就
+                                複製下一組到剪貼簿並往前推進，不用為每組都生一個獨立按鈕、滑
+                                半天螢幕才找得到——50 張標籤也只要一直按同一顆按鈕、切去
+                                BarTender 貼上、切回來再按，一路按到底。
+                                """
+                                import json as _json
+                                _b64_list = [g[0] for g in groups]
+                                _range_list = [
+                                    (f"第{g[1]}張" if g[1] == g[2] else f"第{g[1]}-{g[2]}張")
+                                    for g in groups
+                                ]
+                                _n = len(groups)
+                                _first_rng = _range_list[0]
                                 return f"""
-<button id="{btn_id}" onclick="copyLabel_{btn_id}()" style="
+<img id="prev_{btn_id}" src="data:image/png;base64,{_b64_list[0]}"
+     style="max-width:100%;border:1px solid #ccc;border-radius:4px;margin-bottom:8px">
+<button id="{btn_id}" onclick="copyNext_{btn_id}()" style="
     background:#0068c9;color:white;border:none;border-radius:6px;
-    padding:8px 0;font-size:15px;cursor:pointer;width:100%;margin-top:4px">
-    {label}
+    padding:8px 0;font-size:15px;cursor:pointer;width:100%">
+    複製「{order_no} {_first_rng}」（1/{_n}）
 </button>
 <div id="toast_{btn_id}" style="display:none;margin-top:6px;padding:8px;
     background:#21c354;color:white;border-radius:6px;text-align:center;font-size:14px">
-    ✓ 已複製！可直接貼上到 Codex
 </div>
 <script>
-async function copyLabel_{btn_id}(){{
+const imgs_{btn_id} = {_json.dumps(_b64_list)};
+const rngs_{btn_id} = {_json.dumps(_range_list)};
+let idx_{btn_id} = 0;
+async function copyNext_{btn_id}(){{
     try{{
-        const blob=await fetch('data:image/png;base64,{b64}').then(r=>r.blob());
+        const b64 = imgs_{btn_id}[idx_{btn_id}];
+        const blob = await fetch('data:image/png;base64,'+b64).then(r=>r.blob());
         await navigator.clipboard.write([new ClipboardItem({{'image/png':blob}})]);
-        document.getElementById('toast_{btn_id}').style.display='block';
-        document.getElementById('{btn_id}').textContent='✓ 已複製';
-        document.getElementById('{btn_id}').style.background='#21c354';
-        setTimeout(()=>{{
-            document.getElementById('toast_{btn_id}').style.display='none';
-            document.getElementById('{btn_id}').textContent='{label}';
-            document.getElementById('{btn_id}').style.background='#0068c9';
-        }},2500);
+        document.getElementById('prev_{btn_id}').src = 'data:image/png;base64,'+b64;
+        const toast = document.getElementById('toast_{btn_id}');
+        toast.textContent = '✓ 已複製「{order_no} ' + rngs_{btn_id}[idx_{btn_id}] + '」，可切去貼上';
+        toast.style.display = 'block';
+        idx_{btn_id} = (idx_{btn_id} + 1) % imgs_{btn_id}.length;
+        const btn = document.getElementById('{btn_id}');
+        if (idx_{btn_id} === 0) {{
+            btn.textContent = '全部複製完了，再按一次從頭開始（1/{_n}）';
+        }} else {{
+            btn.textContent = '複製「{order_no} ' + rngs_{btn_id}[idx_{btn_id}] + '」（' + (idx_{btn_id}+1) + '/{_n}）';
+        }}
     }}catch(e){{alert('複製失敗：'+e.message);}}
 }}
 </script>"""
@@ -1033,20 +1055,12 @@ async function copyLabel_{btn_id}(){{
                                         st.warning(f"{_mno}：無法產生預覽（{_mpe}）")
                                         continue
                                     st.markdown(f"**{_mno}**　共 {len(_groups)} 組"
-                                                + ("（每組最多 2 張）" if len(_groups) > 1 else ""))
-                                    for _gi, (_gb64, _pg_first, _pg_last) in enumerate(_groups):
-                                        _rng = (f"第{_pg_first}張" if _pg_first == _pg_last
-                                                else f"第{_pg_first}-{_pg_last}張")
-                                        _bid = f"cp_{_mno.replace('-','_')}_{_gi}"
-                                        st.components.v1.html(
-                                            _copy_button_html(_gb64, _bid, f"複製（{_mno} {_rng}）"),
-                                            height=100,
-                                        )
-                                        st.image(
-                                            BytesIO(__import__('base64').b64decode(_gb64)),
-                                            caption=f"{_mno}　{_rng}",
-                                            use_container_width=True,
-                                        )
+                                                + ("（每組最多 2 張，按鈕會自動換下一組）" if len(_groups) > 1 else ""))
+                                    _bid = f"cp_{_mno.replace('-', '_')}"
+                                    st.components.v1.html(
+                                        _cycling_copy_html(_groups, _mno, _bid),
+                                        height=420,
+                                    )
 
                             if _failed:
                                 st.warning(f"以下出貨單下載失敗：{', '.join(_failed)}")
