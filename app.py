@@ -949,30 +949,35 @@ with tab_label:
                             _success = {no: d for no, d in _results.items() if d}
                             _failed  = [no for no, d in _results.items() if not d]
 
-                            def _pdf_to_combined_b64(pdf_bytes: bytes, dpi: int = 150) -> str:
-                                """把 PDF 所有頁面垂直合併成一張 PNG，回傳 base64"""
+                            def _pdf_to_paired_b64_list(pdf_bytes: bytes, dpi: int = 150, group_size: int = 2) -> list[tuple[str, int, int]]:
+                                """
+                                把 PDF 每一頁轉成圖片，每 group_size 張（預設 2 張）垂直合併成一張
+                                PNG——標籤很多張時（例如 50 張）分成一組一組貼，而不是全部疊成
+                                一張超長圖片貼不動。回傳 [(base64, 起始頁, 結束頁), ...]（頁碼從1起算）。
+                                """
                                 import fitz as _fitz
                                 import base64 as _b64
                                 from PIL import Image as _PILImage
                                 _doc = _fitz.open(stream=pdf_bytes, filetype="pdf")
                                 _imgs = [
-                                    _PILImage.frombytes(
-                                        "RGB",
-                                        [_p.width, _p.height],
-                                        _p.samples,
-                                    )
+                                    _PILImage.frombytes("RGB", [_p.width, _p.height], _p.samples)
                                     for _p in (_doc[i].get_pixmap(dpi=dpi) for i in range(len(_doc)))
                                 ]
-                                _w = max(im.width for im in _imgs)
-                                _h = sum(im.height for im in _imgs)
-                                _combined = _PILImage.new("RGB", (_w, _h), "white")
-                                _y = 0
-                                for im in _imgs:
-                                    _combined.paste(im, (0, _y))
-                                    _y += im.height
-                                _buf = BytesIO()
-                                _combined.save(_buf, format="PNG")
-                                return _b64.b64encode(_buf.getvalue()).decode()
+                                _out = []
+                                for _gi in range(0, len(_imgs), group_size):
+                                    _grp = _imgs[_gi:_gi + group_size]
+                                    _w = max(im.width for im in _grp)
+                                    _h = sum(im.height for im in _grp)
+                                    _combined = _PILImage.new("RGB", (_w, _h), "white")
+                                    _y = 0
+                                    for im in _grp:
+                                        _combined.paste(im, (0, _y))
+                                        _y += im.height
+                                    _buf = BytesIO()
+                                    _combined.save(_buf, format="PNG")
+                                    _out.append((_b64.b64encode(_buf.getvalue()).decode(),
+                                                 _gi + 1, _gi + len(_grp)))
+                                return _out
 
                             def _copy_button_html(b64: str, btn_id: str, label: str) -> str:
                                 return f"""
@@ -1011,19 +1016,6 @@ async function copyLabel_{btn_id}(){{
                                         file_name=f"標籤_{_ono}.pdf",
                                         mime="application/pdf",
                                     )
-                                    try:
-                                        _b64str = _pdf_to_combined_b64(_pdf)
-                                        st.components.v1.html(
-                                            _copy_button_html(_b64str, "cp_single", "複製截圖"),
-                                            height=100,
-                                        )
-                                        st.image(
-                                            BytesIO(__import__('base64').b64decode(_b64str)),
-                                            caption=f"標籤預覽（全頁）：{_ono}",
-                                            use_container_width=True,
-                                        )
-                                    except Exception as _pe:
-                                        st.warning(f"無法產生預覽：{_pe}")
                                 else:
                                     _zb = pack_zip(_success)
                                     st.download_button(
@@ -1033,21 +1025,28 @@ async function copyLabel_{btn_id}(){{
                                         mime="application/zip",
                                         use_container_width=True,
                                     )
+
+                                for _mno, _mpdf in _success.items():
                                     try:
-                                        for _mno, _mpdf in _success.items():
-                                            _mb64 = _pdf_to_combined_b64(_mpdf)
-                                            _bid = f"cp_{_mno.replace('-','_')}"
-                                            st.components.v1.html(
-                                                _copy_button_html(_mb64, _bid, f"複製截圖（{_mno}）"),
-                                                height=100,
-                                            )
-                                            st.image(
-                                                BytesIO(__import__('base64').b64decode(_mb64)),
-                                                caption=f"標籤預覽（全頁）：{_mno}",
-                                                use_container_width=True,
-                                            )
+                                        _groups = _pdf_to_paired_b64_list(_mpdf)
                                     except Exception as _mpe:
-                                        st.warning(f"無法產生預覽：{_mpe}")
+                                        st.warning(f"{_mno}：無法產生預覽（{_mpe}）")
+                                        continue
+                                    st.markdown(f"**{_mno}**　共 {len(_groups)} 組"
+                                                + ("（每組最多 2 張）" if len(_groups) > 1 else ""))
+                                    for _gi, (_gb64, _pg_first, _pg_last) in enumerate(_groups):
+                                        _rng = (f"第{_pg_first}張" if _pg_first == _pg_last
+                                                else f"第{_pg_first}-{_pg_last}張")
+                                        _bid = f"cp_{_mno.replace('-','_')}_{_gi}"
+                                        st.components.v1.html(
+                                            _copy_button_html(_gb64, _bid, f"複製（{_mno} {_rng}）"),
+                                            height=100,
+                                        )
+                                        st.image(
+                                            BytesIO(__import__('base64').b64decode(_gb64)),
+                                            caption=f"{_mno}　{_rng}",
+                                            use_container_width=True,
+                                        )
 
                             if _failed:
                                 st.warning(f"以下出貨單下載失敗：{', '.join(_failed)}")
