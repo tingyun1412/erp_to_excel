@@ -18,9 +18,11 @@
      找得到；找不到才跟著「下一頁」按鈕用的 Domino Click token 翻頁。
   2. 開啟該筆文件（EditDocument）— 取得 SeleNum（預設全選的標籤序號清單）。
   3. 呼叫「列印選取標籤(標籤機)」按鈕實際打的網址（RunAgent，
-     Function=PrtSele2DBarcode4Supplier）— 用 Playwright 開啟這個網址，
-     對每一張標籤（<table class='lable'>）個別截圖，裁切精準，畫面跟均華
-     網站本身完全一致。
+     Function=PrtSele2DBarCode，注意不是 PrtSele2DBarcode4Supplier——後者是
+     3欄並排、顏色會輪替黃/綠/青的另一種格式，不是「標籤機」按鈕真正對應
+     的那個）— 用 Playwright 開啟這個網址，對每一張標籤
+     （<table class='lable'>）個別截圖，裁切精準，畫面跟均華網站本身完全
+     一致（每張獨立一頁、統一淡黃色底）。
 """
 import io
 import re
@@ -101,7 +103,7 @@ def _screenshot_labels(username: str, password: str, doc_uid: str, sele_num: str
     _ensure_chromium_installed()
     from playwright.sync_api import sync_playwright
 
-    url = (f"{BASE}/RunAgent?OpenAgent&Function=PrtSele2DBarcode4Supplier"
+    url = (f"{BASE}/RunAgent?OpenAgent&Function=PrtSele2DBarCode"
            f"&ParentUNID={doc_uid}&SeleNum={sele_num}")
 
     with sync_playwright() as pw:
