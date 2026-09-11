@@ -1,6 +1,12 @@
 ﻿# 客戶 RTF 銷貨單 & Excel 模板（含敏感資料）
 files/
 
+# 本機儲存的標籤模板 / LSCR 基礎模板（取代原本的 Google Sheets + Drive）
+local_data/
+
+# webview_launcher.py 執行時的輸出記錄
+logs/
+
 # Python
 __pycache__/
 *.py[cod]

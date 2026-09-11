@@ -7,7 +7,18 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-本地執行前，先把 `.streamlit/secrets.toml` 填入真實的 Google 憑證。
+本地執行前，先把 `.streamlit/secrets.toml` 填入真實的 Google 憑證，以及下面的 ERP 資料庫連線設定：
+
+```toml
+[mssql]
+server   = "ntserver"
+database = "24405403"
+user     = "xxx"
+password = "xxx"
+```
+
+⚠️ 這個資料庫在公司內網，只有在公司或開 VPN 時才連得到；「查詢銷貨單」功能只能本機執行，
+部署到 Streamlit Cloud 的話連不到，此功能會直接顯示錯誤訊息。
 
 ---
 
@@ -51,7 +62,8 @@ refresh_token = "xxxxx"
 | 檔案 | 說明 |
 |------|------|
 | `app.py` | 主介面 |
-| `rtf_parser.py` | 解析銷貨單 RTF |
+| `erp_db.py` | 用單據號碼查 ERP 資料庫（批號／單價／金額／客戶資料），取代舊的 RTF 上傳流程 |
+| `rtf_parser.py` | 舊版：解析銷貨單 RTF（app.py 已不再使用，保留供參考） |
 | `sheets_db.py` | Google Sheets 讀寫 |
 | `module_b_invoice.py` | 電子發票產生 |
 | `module_c_labels.py` | 標籤產生（含欄位自訂） |

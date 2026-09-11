@@ -17,11 +17,10 @@ def parse_lscr_excel_wb(wb: openpyxl.Workbook) -> list[dict]:
     回傳 list[order_dict]，每個 PO NO 一筆。
 
     每個 item 含標準欄位外，另有私有欄位：
-      _total_qty  : 總出貨數量 (str)
-      _large_qty  : 大包裝數量 (str)
-      _large_unit : 大包裝單位
-      _small_qty  : 小包裝數量 (str)
-      _small_unit : 小包裝單位
+      _total_qty  : 訂單數量/總數量 (str)
+      _small_qty  : 標籤（小包裝）數量 (str) —— 標籤實際印的就是這個數字
+      _small_unit : 標籤單位，固定 "PCS"
+      _pack_qty   : 裝箱數量 (str) —— 純粹紀錄用，不影響標籤內容
     """
     if "list" not in wb.sheetnames:
         raise ValueError("找不到 'list' 工作表")
@@ -43,16 +42,17 @@ def parse_lscr_excel_wb(wb: openpyxl.Workbook) -> list[dict]:
     # 欄位：C1=ID1, C2=ID2,
     #       C5=PO NO, C6=LOT NO, C7=Item(料號), C8=成品圖號,
     #       C9=品名, C10=規格,
-    #       C11=總數量
-    # C12~C15 有兩種版本的確認單格式，逐行判斷用哪一種（見下方）：
-    #   舊版：C12=大包裝qty, C13=大包裝unit, C14=小包裝qty, C15=小包裝unit
-    #   新版（C14 沒有值時）：C12=標籤(小包裝)qty, C13=標籤(小包裝)unit，
-    #                        大包裝固定＝該行自己的訂單總數量（C11）
+    #       C11=訂單數量(總數量)，
+    #       C12=標籤（小包裝）數量 —— 標籤只印這一欄，
+    #       C13=裝箱數量 —— 純粹紀錄用，不管填多少都不影響標籤內容
+    #         （之前把 C13 誤當成「單位文字」接到標籤數量後面，
+    #           變成裝箱的數字混進標籤顯示的數量，已改成完全不參與計算）。
+    #       C14/C15 是同樣「標籤/裝箱」的重複表頭，目前版本的確認單一律空白，不使用。
     orders_map: dict[str, dict] = {}
 
     for r in range(6, ws.max_row + 1):
         item_col = _v(ws, r, 7)    # Item (料號)
-        total_col = _v(ws, r, 11)  # 總數量
+        total_col = _v(ws, r, 11)  # 訂單數量(總數量)
         if not item_col or not total_col:
             continue
         if item_col.lower() in ("item", "料號", "品名", "no."):
@@ -65,48 +65,29 @@ def parse_lscr_excel_wb(wb: openpyxl.Workbook) -> list[dict]:
         remark = _v(ws, r, 8)   # 成品圖號
         name = _v(ws, r, 9)
         desc = _v(ws, r, 10)
-        col12 = _v(ws, r, 12)
-        col13 = _v(ws, r, 13)
-        col14 = _v(ws, r, 14)
-        col15 = _v(ws, r, 15)
-
-        if col14:
-            # 舊版格式：C14 有值，照舊當小包裝欄位
-            large_qty = col12
-            large_unit = col13 or "PCS"
-            small_qty = col14
-            small_unit = col15 or "PCS"
-        else:
-            # 新版格式：沒有獨立的大包裝欄位，C12/C13 是小包裝（固定兩張），
-            # 大標籤直接印這一行自己的訂單總數量
-            large_qty = total_col
-            large_unit = "PCS"
-            small_qty = col12
-            small_unit = col13 or "PCS"
+        label_qty = _v(ws, r, 12)  # 標籤（小包裝）數量
+        pack_qty  = _v(ws, r, 13)  # 裝箱數量：僅供參考，不影響標籤
 
         # 品名加入 ID1/ID2 尺寸
         if id1 and id2:
             name = f"{name}（ID1={id1}mm*ID2={id2}mm）"
 
-        # 預設用小包裝數量顯示
-        qty = small_qty if small_qty else total_col
-        unit = small_unit if small_qty else large_unit
+        qty = label_qty if label_qty else total_col
 
         item = {
             "item_no":      item_col,
             "name":         name,
             "description":  desc,
             "quantity":     qty,
-            "unit":         unit,
+            "unit":         "PCS",
             "lot_no":       lot_no,
             "remark":       remark,
             "ship_date":    ship_date,
-            # 私有欄位供展開邏輯使用
+            # 私有欄位供 write_lscr_labels／預覽表使用
             "_total_qty":   total_col,
-            "_large_qty":   large_qty or total_col,
-            "_large_unit":  large_unit,
-            "_small_qty":   small_qty,
-            "_small_unit":  small_unit,
+            "_small_qty":   qty,
+            "_small_unit":  "PCS",
+            "_pack_qty":    pack_qty,
         }
 
         if po_no not in orders_map:
@@ -120,49 +101,6 @@ def parse_lscr_excel_wb(wb: openpyxl.Workbook) -> list[dict]:
         orders_map[po_no]["items"].append(item)
 
     return list(orders_map.values())
-
-
-def expand_lscr_items(orders: list[dict],
-                      include_small: bool = True,
-                      include_large: bool = True) -> list[dict]:
-    """
-    依大/小包裝展開品項：
-    - include_small: 固定產生 2 張小包裝標籤（每張 = 小包裝數量）
-    - include_large: 產生 1 張大包裝標籤（= 大包裝/總出貨數量）
-    若大小包裝數量相同（只有一箱），只印一張。
-    """
-    result = []
-    for o in orders:
-        new_o = dict(o)
-        new_items = []
-        for itm in o.get("items", []):
-            total = float(itm.get("_total_qty") or itm.get("quantity") or 0)
-            small = float(itm.get("_small_qty") or total)
-            large = float(itm.get("_large_qty") or total)
-            large_unit = itm.get("_large_unit") or itm.get("unit") or "PCS"
-            small_unit = itm.get("_small_unit") or itm.get("unit") or "PCS"
-
-            one_box = (small >= total or total == 0)
-
-            if one_box:
-                # 只有一箱，印一張
-                new_items.append(dict(itm))
-            else:
-                if include_small and small > 0:
-                    for _ in range(2):  # 固定 2 張小包裝
-                        s = dict(itm)
-                        s["quantity"] = str(int(small))
-                        s["unit"] = small_unit
-                        new_items.append(s)
-                if include_large:
-                    l = dict(itm)
-                    l["quantity"] = str(int(large))
-                    l["unit"] = large_unit
-                    new_items.append(l)
-
-        new_o["items"] = new_items
-        result.append(new_o)
-    return result
 
 
 def parse_lscr_excel(path: str) -> list[dict]:

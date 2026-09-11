@@ -1,166 +1,13 @@
 """
-模組 B：銷貨單 → 電子發票上傳 Excel（.xls）
-依照 e-invoice.com.tw V1.6 格式產生可直接上傳的 .xls 檔案。
+模組 B：月結（驗收資訊）→ 電子發票
 
-規則：
-- 銷貨單有發票號碼才匯入，沒有的直接跳過
-- 發票人（賣方）統編固定 24405403
-- 受票人（買方）統編從銷貨單的 buyer_tax_id 取
-- 單價、金額直接取自銷貨單解析結果
+驗收資訊 xlsx 彙整成一張發票，跟一般銷貨單一樣改用 einvoice_submitter.py
+逐項填進 e-invoice.com.tw 網站、由人工按下開立（由網站配發發票號碼），
+不再產生舊版 V1.6 格式的 .xls 整批上傳檔。
 """
-from datetime import datetime
 from io import BytesIO
 
-import xlwt
-
 SELLER_TAX_ID = "24405403"
-
-# ── xlwt 樣式 ─────────────────────────────────────────────────────
-_HDR = xlwt.easyxf(
-    "font: bold on, colour white; "
-    "pattern: pattern solid, fore_colour dark_blue; "
-    "alignment: horiz centre, vert centre; "
-    "borders: left thin, right thin, top thin, bottom thin"
-)
-_DAT = xlwt.easyxf(
-    "alignment: horiz centre, vert centre; "
-    "borders: left thin, right thin, top thin, bottom thin"
-)
-_DAT_L = xlwt.easyxf(
-    "alignment: horiz left, vert centre; "
-    "borders: left thin, right thin, top thin, bottom thin"
-)
-
-
-def _tw_date(date_str: str) -> str:
-    """YYYYMMDD → 民國年 YYYMMDD（7 碼）"""
-    if len(date_str) == 8:
-        try:
-            y = int(date_str[:4]) - 1911
-            return f"{y}{date_str[4:]}"
-        except ValueError:
-            pass
-    today = datetime.today()
-    return f"{today.year - 1911}{today.month:02d}{today.day:02d}"
-
-
-def _now_time() -> str:
-    return datetime.now().strftime("%H%M%S")
-
-
-def _col_width(chars: int) -> int:
-    """xlwt 欄寬單位：1/256 個字元寬度"""
-    return max(chars, 8) * 300
-
-
-def generate_invoice_excel(
-    orders: list[dict],
-    seller_tax_id: str = SELLER_TAX_ID,
-    invoice_prefix: str = "AA",   # 保留參數但已改用銷貨單發票號碼
-    start_number: int = 1,
-) -> BytesIO:
-    """
-    接收多張銷貨單，只處理有發票號碼的訂單，產生 .xls 格式上傳檔。
-    回傳 BytesIO（.xls bytes）。
-    """
-    wb = xlwt.Workbook(encoding="utf-8")
-    ws_main   = wb.add_sheet("發票主檔")
-    ws_detail = wb.add_sheet("發票明細")
-
-    # ── 主檔標題 ──────────────────────────────────────────────────
-    main_headers = [
-        "發票號碼(IVNO)", "發票日期(IVDAT)", "發票時間(IVTM)",
-        "未稅金額(IVAMT)", "稅率別(TAXRID)", "營業稅額(SALTAXAMT)",
-        "發票人統一編號(IVPESRFNO)", "受票人統一編號(TAIVPESRFNO)",
-        "款項別(CAID)", "相關號碼(RELNO)", "原幣金額(OCRYAMT)",
-        "匯率(EXR)", "幣別(CUCY)", "彙開(GROPMK)", "通關方式(CSTMMK)",
-        "買方聯絡人(BUYRCTM)", "買方聯絡人部門(BUYRCTMDP)",
-        "買受人電子郵件(CUEMAIL)", "總備註(COMT5)",
-        "發票開立自動通知(OPNAUTNTI)", "作廢發票自動通知(CANCELAUTNTI)",
-        "零稅率原因(ZEROTAXRATEREASON)",
-    ]
-    detail_headers = [
-        "發票號碼(IVNO)", "項次(IT)", "品名(DSR)", "品名2(DSR2)",
-        "數量(QTY1)", "單位(UN1)", "單價(UP)", "金額(AMT)",
-        "相關號碼一(RELNO1)", "相關號碼二(RELNO2)",
-    ]
-
-    for col, h in enumerate(main_headers):
-        ws_main.write(0, col, h, _HDR)
-        ws_main.col(col).width = _col_width(len(h))
-
-    for col, h in enumerate(detail_headers):
-        ws_detail.write(0, col, h, _HDR)
-        ws_detail.col(col).width = _col_width(len(h))
-
-    # ── 填入資料 ──────────────────────────────────────────────────
-    main_row   = 1   # xlwt 從 0 開始
-    detail_row = 1
-
-    for order in orders:
-        # 沒有發票號碼的銷貨單直接略過
-        inv_no = order.get("invoice_no", "").strip()
-        if not inv_no:
-            continue
-
-        items = order.get("items", [])
-        if not items:
-            continue
-
-        # 金額計算（未稅）
-        total_amount = sum(
-            item.get("quantity", 0) * item.get("unit_price", 0)
-            for item in items
-        )
-        tax_amount = round(total_amount * 0.05)
-
-        inv_date = _tw_date(order.get("order_date", ""))
-        inv_time = _now_time()
-        sid = seller_tax_id or SELLER_TAX_ID
-        bid = order.get("buyer_tax_id", "")
-        relno = order.get("order_no", "")
-
-        main_vals = [
-            inv_no, inv_date, inv_time,
-            total_amount, 1, tax_amount,
-            sid, bid,
-            "Z", relno, "", 1, "TWD",
-            "", "", "", "", "", "",
-            "", "", "",
-        ]
-        for col, val in enumerate(main_vals):
-            ws_main.write(main_row, col, val, _DAT)
-        main_row += 1
-
-        # 明細
-        for idx, item in enumerate(items, 1):
-            qty  = item.get("quantity", 1) or 1
-            unit = item.get("unit", "PC")
-            up   = item.get("unit_price", 0)
-            amt  = qty * up
-            # 品名 = 品名 + 規格 合一
-            name = item.get("name", "")
-            spec = item.get("description", "")
-            desc = (name + " " + spec).strip() or item.get("item_no", "")
-            desc2  = item.get("remark", "") or ""
-            relno1 = order.get("customer_order_no", "") or order.get("order_no", "")
-            relno2 = item.get("remark", "") or ""
-
-            det_vals = [
-                inv_no, idx, desc, desc2,
-                qty, unit, up, amt,
-                relno1, relno2,
-            ]
-            for col, val in enumerate(det_vals):
-                style = _DAT_L if col == 2 else _DAT
-                ws_detail.write(detail_row, col, val, style)
-            detail_row += 1
-
-    buf = BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    return buf
-
 
 # ── 月結驗收資訊 ─────────────────────────────────────────────────
 
@@ -217,75 +64,33 @@ def parse_acceptance_excel(content: bytes) -> list[dict]:
     return result
 
 
-def generate_invoice_from_acceptance(
+def acceptance_rows_to_order(
     rows: list[dict],
-    invoice_no: str,
-    invoice_date: str,
+    order_no: str,
+    customer_name: str,
     buyer_tax_id: str,
-    seller_tax_id: str = SELLER_TAX_ID,
-) -> BytesIO:
+) -> dict:
     """
-    從 parse_acceptance_excel 的 rows 產生電子發票上傳 xls。
-    invoice_date: YYYYMMDD 字串
+    把 parse_acceptance_excel 的 rows 彙整成一張「訂單」，
+    餵給 einvoice_submitter.fill_one_order 逐項填進網站表單。
+    每個品項各自帶自己那一行的出貨單號／單號，分別對應相關號碼一／二，
+    跟舊版 V1.6 上傳檔的欄位對應一致。
     """
-    wb = xlwt.Workbook(encoding="utf-8")
-    ws_main   = wb.add_sheet("發票主檔")
-    ws_detail = wb.add_sheet("發票明細")
-
-    main_headers = [
-        "發票號碼(IVNO)", "發票日期(IVDAT)", "發票時間(IVTM)",
-        "未稅金額(IVAMT)", "稅率別(TAXRID)", "營業稅額(SALTAXAMT)",
-        "發票人統一編號(IVPESRFNO)", "受票人統一編號(TAIVPESRFNO)",
-        "款項別(CAID)", "相關號碼(RELNO)", "原幣金額(OCRYAMT)",
-        "匯率(EXR)", "幣別(CUCY)", "彙開(GROPMK)", "通關方式(CSTMMK)",
-        "買方聯絡人(BUYRCTM)", "買方聯絡人部門(BUYRCTMDP)",
-        "買受人電子郵件(CUEMAIL)", "總備註(COMT5)",
-        "發票開立自動通知(OPNAUTNTI)", "作廢發票自動通知(CANCELAUTNTI)",
-        "零稅率原因(ZEROTAXRATEREASON)",
-    ]
-    detail_headers = [
-        "發票號碼(IVNO)", "項次(IT)", "品名(DSR)", "品名2(DSR2)",
-        "數量(QTY1)", "單位(UN1)", "單價(UP)", "金額(AMT)",
-        "相關號碼一(RELNO1)", "相關號碼二(RELNO2)",
-    ]
-
-    for c, h in enumerate(main_headers):
-        ws_main.write(0, c, h, _HDR)
-        ws_main.col(c).width = _col_width(len(h))
-    for c, h in enumerate(detail_headers):
-        ws_detail.write(0, c, h, _HDR)
-        ws_detail.col(c).width = _col_width(len(h))
-
-    total_amount = sum(r.get("amount", 0) for r in rows)
-    tax_amount   = round(total_amount * 0.05)
-
-    main_vals = [
-        invoice_no, _tw_date(invoice_date), _now_time(),
-        total_amount, 1, tax_amount,
-        seller_tax_id, buyer_tax_id,
-        "Z", "", "", 1, "TWD",
-        "", "", "", "", "", "",
-        "", "", "",
-    ]
-    for c, val in enumerate(main_vals):
-        ws_main.write(1, c, val, _DAT)
-
-    for idx, row in enumerate(rows, 1):
-        name = row.get("name", "")
-        spec = row.get("spec", "")
-        dsr  = (name + "　" + spec).strip() if spec else name
-        det_vals = [
-            invoice_no, idx,
-            dsr, row.get("part_no", ""),
-            row.get("qty", 0), "個",
-            row.get("unit_price", 0), row.get("amount", 0),
-            row.get("order_no", ""), row.get("line_no", ""),
-        ]
-        for c, val in enumerate(det_vals):
-            style = _DAT_L if c == 2 else _DAT
-            ws_detail.write(idx, c, val, style)
-
-    buf = BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    return buf
+    items = []
+    for row in rows:
+        items.append({
+            "item_no": row.get("part_no", ""),
+            "name": row.get("name", ""),
+            "description": row.get("spec", ""),
+            "quantity": row.get("qty", 0),
+            "unit_price": row.get("unit_price", 0),
+            "unit": "PCS",
+            "customer_order_no": row.get("order_no", ""),  # 相關號碼一：該行自己的出貨單號
+            "remark": row.get("line_no", ""),               # 相關號碼二：該行自己的單號
+        })
+    return {
+        "order_no": order_no,
+        "customer_name": customer_name,
+        "buyer_tax_id": buyer_tax_id,
+        "items": items,
+    }

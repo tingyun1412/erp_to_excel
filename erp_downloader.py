@@ -19,9 +19,14 @@ ERP_ORDERS = "https://scm.honprec.com/HP/MA10.aspx"   # 出貨單列表（觀察
 def _ensure_chromium_installed():
     """惰性安裝 Chromium：只有真的要用 ERP 下載時才檢查/安裝，
     避免每次 app 冷啟動都跑一次（不管使用者有沒有用到這個功能），
-    拖慢啟動速度、吃掉容器記憶體。"""
-    chrome_dir = Path.home() / ".cache/ms-playwright"
-    if not chrome_dir.exists():
+    拖慢啟動速度、吃掉容器記憶體。
+    直接問 Playwright 實際會去哪裡找執行檔（會尊重 PLAYWRIGHT_BROWSERS_PATH），
+    而不是猜一個固定路徑——固定路徑在 Windows 上跟預設快取位置對不起來，
+    會導致明明已經裝好還是每次都想重新下載。"""
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as pw:
+        exe = Path(pw.chromium.executable_path)
+    if not exe.exists():
         subprocess.run(
             [sys.executable, "-m", "playwright", "install", "chromium"],
             check=True,
