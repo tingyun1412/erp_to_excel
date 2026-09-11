@@ -7,7 +7,7 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-本地執行前，先把 `.streamlit/secrets.toml` 填入真實的 Google 憑證，以及下面的 ERP 資料庫連線設定：
+執行前，請先於 `.streamlit/secrets.toml` 設定 ERP 資料庫連線資訊：
 
 ```toml
 [mssql]
@@ -17,43 +17,27 @@ user     = "xxx"
 password = "xxx"
 ```
 
-⚠️ 這個資料庫在公司內網，只有在公司或開 VPN 時才連得到；「查詢銷貨單」功能只能本機執行，
-部署到 Streamlit Cloud 的話連不到，此功能會直接顯示錯誤訊息。
+註：此資料庫僅限公司內網存取，須於公司內或連接 VPN 後才能連線；「查詢銷貨單」功能僅支援本機執行。
+
+模板、廠商帳號、發票跳過名單、發票開立紀錄、出貨提醒等資料均已改為本機檔案儲存
+（詳見 `local_db.py`、`local_template_store.py`），不再依賴 Google Sheets / Drive，
+亦無需設定任何 Google 憑證。
 
 ---
 
-## 部署到 Streamlit Cloud
+## 部署架構
 
-1. 把這個資料夾推到 GitHub（私有 repo）
-2. 到 https://share.streamlit.io 連結 repo，main file 選 `app.py`
-3. 在 App Settings → **Secrets** 貼入以下內容（換成真實值）：
+目前採用「正本存放於公司網路磁碟、各終端機執行本機備份」的部署方式：
 
-```toml
-[gcp_service_account]
-type = "service_account"
-project_id = "erptoexcel"
-private_key_id = "07b1db8a..."
-private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
-client_email = "erp-995@erptoexcel.iam.gserviceaccount.com"
-client_id = "117422..."
-auth_uri = "https://accounts.google.com/o/oauth2/auth"
-token_uri = "https://oauth2.googleapis.com/token"
-auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
-client_x509_cert_url = "https://www.googleapis.com/robot/v1/metadata/x509/erp-995%40erptoexcel.iam.gserviceaccount.com"
-```
-
-模板 Excel 存 Google Drive 這部分**不能用上面的 service account**（它沒有 My Drive 儲存額度，上傳會 403）。
-改用一個真人 Google 帳號（例如另外申請的 mobanchucun@gmail.com）授權，跑一次 `gen_drive_refresh_token.py`
-（步驟見檔案內註解）取得 refresh_token 後，一併貼進 Secrets：
-
-```toml
-[gcp_oauth]
-client_id = "xxxxx.apps.googleusercontent.com"
-client_secret = "xxxxx"
-refresh_token = "xxxxx"
-```
-
-4. Deploy → 拿到網址給同事用
+1. 將完整資料夾（含封裝完成的 `python/` 內嵌執行環境、`ms-playwright/` 瀏覽器元件，
+   以及 `app/` 程式碼）置於公司網路磁碟。
+2. 各使用者於本機電腦執行網路磁碟中的 `install_local.bat`：
+   - 透過 robocopy 將 `app`、`python`、`ms-playwright` 同步至 `%LOCALAPPDATA%\ShippingAutomationTool`。
+   - 於桌面建立「ShippingTool」捷徑，以 `pythonw.exe` 執行 `webview_launcher.py`。
+   - 網路磁碟版本更新後，重新執行一次 `install_local.bat` 即可同步至最新版本。
+3. 啟動捷徑後，`webview_launcher.py` 會於背景啟動本機 Streamlit 伺服器
+   （僅監聽 127.0.0.1，設定見 `.streamlit/config.toml`），並以 pywebview 包裝為
+   原生視窗介面（無網址列、無終端機視窗）；執行紀錄輸出至 `logs/app.log`。
 
 ---
 
@@ -62,17 +46,27 @@ refresh_token = "xxxxx"
 | 檔案 | 說明 |
 |------|------|
 | `app.py` | 主介面 |
-| `erp_db.py` | 用單據號碼查 ERP 資料庫（批號／單價／金額／客戶資料），取代舊的 RTF 上傳流程 |
-| `rtf_parser.py` | 舊版：解析銷貨單 RTF（app.py 已不再使用，保留供參考） |
-| `sheets_db.py` | Google Sheets 讀寫 |
-| `module_b_invoice.py` | 電子發票產生 |
-| `module_c_labels.py` | 標籤產生（含欄位自訂） |
-| `.streamlit/secrets.toml` | 憑證設定（不推 GitHub）|
+| `webview_launcher.py` | 本機啟動器，將 Streamlit 封裝為原生視窗（pywebview） |
+| `install_local.bat` | 部署腳本，將程式由網路磁碟同步至本機並建立桌面捷徑 |
+| `erp_db.py` | 依單據號碼查詢 ERP 資料庫（批號／單價／金額／客戶資料） |
+| `erp_downloader.py` | 登入 ERP 網站並自動下載標籤 PDF |
+| `slp_downloader.py` | 均華（GMM）供應商平台標籤下載，擷取原始網頁畫面組成 PDF |
+| `lscr_parser.py` | 解析 LSCR 出貨明細確認單 |
+| `einvoice_submitter.py` | 電子發票逐張自動送出（e-invoice.com.tw） |
+| `local_db.py` | 廠商帳號／發票跳過名單／發票開立紀錄／出貨提醒之本機檔案儲存 |
+| `local_template_store.py` | 標籤模板／LSCR 基礎模板之本機檔案儲存 |
+| `template_engine.py` | 標籤模板引擎，支援多種模板格式 |
+| `module_a_calendar.py` | 模組 A：銷貨單轉出貨行事曆 |
+| `module_b_invoice.py` | 模組 B：電子發票產生 |
+| `module_c_labels.py` | 模組 C：標籤產生，支援欄位自訂 |
+| `module_d_report.py` | 模組 D：生產日報表彙總 |
+| `pdf_to_excel.py` | PDF 標籤轉貼至 Excel |
+| `rtf_parser.py` | 舊版銷貨單 RTF 解析程式，現已不再使用，保留供參考 |
+| `.streamlit/secrets.toml` | 憑證設定檔（不納入版本控制） |
 
 ---
 
 ## 注意事項
 
-- `.streamlit/secrets.toml` 已加入 `.gitignore`，**不會**推到 GitHub
-- Google Service Account 的 JSON key 請定期輪換（建議每年）
-- Streamlit Cloud 免費版閒置 7 天會睡眠，第一個使用者開網頁時等約 30 秒喚醒
+- `.streamlit/secrets.toml`、`local_data/`、`files/`、`logs/` 均已列入 `.gitignore`，不會推送至 GitHub。
+- 應用程式僅監聽 127.0.0.1，同一網路內其他電腦無法連線存取（詳見 `.streamlit/config.toml` 內註解）。
