@@ -20,7 +20,7 @@ password = "xxx"
 註：此資料庫僅限公司內網存取，須於公司內或連接 VPN 後才能連線；「查詢銷貨單」功能僅支援本機執行。
 
 模板、廠商帳號、發票跳過名單、發票開立紀錄、出貨提醒等資料均已改為本機檔案儲存
-（詳見 `local_db.py`、`local_template_store.py`），不再依賴 Google Sheets / Drive，
+（詳見 `src/local_db.py`、`src/local_template_store.py`），不再依賴 Google Sheets / Drive，
 亦無需設定任何 Google 憑證。
 
 ---
@@ -41,6 +41,33 @@ password = "xxx"
 
 ---
 
+## 目錄結構
+
+```
+app.py                  進入點：Streamlit 主介面（streamlit run app.py）
+webview_launcher.py     進入點：本機啟動器，將 Streamlit 封裝為原生視窗
+install_local.bat       進入點：部署腳本（由網路磁碟根目錄執行）
+requirements.txt
+packages.txt
+.streamlit/
+  config.toml
+  secrets.toml          憑證設定檔（不納入版本控制）
+src/                    核心邏輯模組
+  erp_db.py
+  erp_downloader.py
+  slp_downloader.py
+  lscr_parser.py
+  einvoice_submitter.py
+  local_db.py
+  local_template_store.py
+  template_engine.py
+  module_b_invoice.py
+  module_d_report.py
+  rtf_parser.py
+```
+
+上述三個進入點（`app.py`、`webview_launcher.py`、`install_local.bat`）皆被外部部署流程／桌面捷徑直接指向，故維持於根目錄；其餘業務邏輯模組統一收納於 `src/`。
+
 ## 檔案說明
 
 | 檔案 | 說明 |
@@ -48,20 +75,17 @@ password = "xxx"
 | `app.py` | 主介面 |
 | `webview_launcher.py` | 本機啟動器，將 Streamlit 封裝為原生視窗（pywebview） |
 | `install_local.bat` | 部署腳本，將程式由網路磁碟同步至本機並建立桌面捷徑 |
-| `erp_db.py` | 依單據號碼查詢 ERP 資料庫（批號／單價／金額／客戶資料） |
-| `erp_downloader.py` | 登入 ERP 網站並自動下載標籤 PDF |
-| `slp_downloader.py` | 均華（GMM）供應商平台標籤下載，擷取原始網頁畫面組成 PDF |
-| `lscr_parser.py` | 解析 LSCR 出貨明細確認單 |
-| `einvoice_submitter.py` | 電子發票逐張自動送出（e-invoice.com.tw） |
-| `local_db.py` | 廠商帳號／發票跳過名單／發票開立紀錄／出貨提醒之本機檔案儲存 |
-| `local_template_store.py` | 標籤模板／LSCR 基礎模板之本機檔案儲存 |
-| `template_engine.py` | 標籤模板引擎，支援多種模板格式 |
-| `module_a_calendar.py` | 模組 A：銷貨單轉出貨行事曆 |
-| `module_b_invoice.py` | 模組 B：電子發票產生 |
-| `module_c_labels.py` | 模組 C：標籤產生，支援欄位自訂 |
-| `module_d_report.py` | 模組 D：生產日報表彙總 |
-| `pdf_to_excel.py` | PDF 標籤轉貼至 Excel |
-| `rtf_parser.py` | 舊版銷貨單 RTF 解析程式，現已不再使用，保留供參考 |
+| `src/erp_db.py` | 依單據號碼查詢 ERP 資料庫（批號／單價／金額／客戶資料） |
+| `src/erp_downloader.py` | 登入 ERP 網站並自動下載標籤 PDF |
+| `src/slp_downloader.py` | 均華（GMM）供應商平台標籤下載，擷取原始網頁畫面組成 PDF |
+| `src/lscr_parser.py` | 解析 LSCR 出貨明細確認單 |
+| `src/einvoice_submitter.py` | 電子發票逐張自動送出（e-invoice.com.tw） |
+| `src/local_db.py` | 廠商帳號／發票跳過名單／發票開立紀錄／出貨提醒之本機檔案儲存 |
+| `src/local_template_store.py` | 標籤模板／LSCR 基礎模板之本機檔案儲存 |
+| `src/template_engine.py` | 標籤模板引擎，支援多種模板格式 |
+| `src/module_b_invoice.py` | 模組 B：電子發票產生 |
+| `src/module_d_report.py` | 模組 D：生產日報表彙總 |
+| `src/rtf_parser.py` | 銷貨單 RTF 解析；主流程已改查 ERP 資料庫，目前僅供 `erp_db.py` 呼叫其中的中英文前綴切分工具函式 |
 | `.streamlit/secrets.toml` | 憑證設定檔（不納入版本控制） |
 
 ---

@@ -6,12 +6,15 @@
 """
 import json
 import re
+import sys
 from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 import openpyxl
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from erp_db import lookup_orders_by_no, ErpDbError
 from lscr_parser import parse_lscr_excel_wb
